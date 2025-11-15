@@ -61,6 +61,7 @@ $dockerContextPath = Join-Path $repoRoot $DockerContext
 $dockerfilePath = Join-Path $repoRoot $Dockerfile
 $taskTemplatePath = Join-Path $repoRoot $TaskDefinitionTemplate
 $renderedTaskPath = Join-Path $repoRoot $RenderedTaskDefinition
+$utf8NoBomEncoding = New-Object System.Text.UTF8Encoding($false)
 
 Ensure-Command docker
 Ensure-Command aws
@@ -135,9 +136,23 @@ if (-not (Test-Path $taskTemplatePath)) {
 Invoke-Step "Rendering task definition" {
     $templateContent = Get-Content -Raw -Path $taskTemplatePath | ConvertFrom-Json
 
-    if ($templateContent.executionRoleArn -match "123456789012" -or
-        $templateContent.taskRoleArn -match "123456789012") {
-        throw "Update role ARNs in $TaskDefinitionTemplate before running this script."
+    # Substitute environment variables in role ARNs
+    if ($templateContent.executionRoleArn -match '\$\{([^}]+)\}') {
+        $varName = $matches[1]
+        $envValue = [Environment]::GetEnvironmentVariable($varName)
+        if (-not $envValue) {
+            throw "Environment variable '$varName' (for executionRoleArn) is not set."
+        }
+        $templateContent.executionRoleArn = $envValue
+    }
+    
+    if ($templateContent.taskRoleArn -match '\$\{([^}]+)\}') {
+        $varName = $matches[1]
+        $envValue = [Environment]::GetEnvironmentVariable($varName)
+        if (-not $envValue) {
+            throw "Environment variable '$varName' (for taskRoleArn) is not set."
+        }
+        $templateContent.taskRoleArn = $envValue
     }
 
     $container = $templateContent.containerDefinitions | Where-Object { $_.name -eq $ContainerName }
@@ -145,9 +160,27 @@ Invoke-Step "Rendering task definition" {
         throw "Container '$ContainerName' not found in task definition template."
     }
 
-    $container.image = $imageUri
+    # Substitute image URI
+    if ($container.image -match '\$\{([^}]+)\}') {
+        $container.image = $imageUri
+    } else {
+        $container.image = $imageUri
+    }
 
-    $templateContent | ConvertTo-Json -Depth 10 | Set-Content -Path $renderedTaskPath -Encoding UTF8
+    # Substitute environment variables in container environment
+    foreach ($envVar in $container.environment) {
+        if ($envVar.value -match '\$\{([^}]+)\}') {
+            $varName = $matches[1]
+            $envValue = [Environment]::GetEnvironmentVariable($varName)
+            if (-not $envValue) {
+                throw "Environment variable '$varName' (for $($envVar.name)) is not set."
+            }
+            $envVar.value = $envValue
+        }
+    }
+
+    $jsonContent = $templateContent | ConvertTo-Json -Depth 10
+    [System.IO.File]::WriteAllText($renderedTaskPath, $jsonContent, $utf8NoBomEncoding)
     Write-Host "Rendered task definition written to $renderedTaskPath"
 }
 
