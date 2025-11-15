@@ -3,7 +3,7 @@
 import { api } from "@/trpc/react";
 import { ContentCard } from "./ContentCard";
 import { ContentFilters } from "./ContentFilters";
-import type { AssetType } from "@/lib/types/storage";
+import type { AssetType } from "@/types/storage";
 import { useState } from "react";
 import {
   Empty,
@@ -15,7 +15,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { getAssetTypeFromKey } from "./utils";
 
 export function ContentGallery() {
-  const [selectedFilter, setSelectedFilter] = useState<AssetType | "all">("all");
+  const [selectedFilter, setSelectedFilter] = useState<AssetType | "all">(
+    "all",
+  );
 
   // Fetch all files from output folder
   const { data, isLoading, refetch } = api.storage.listFiles.useQuery({
@@ -50,7 +52,7 @@ export function ContentGallery() {
     return (
       <div className="space-y-4">
         <Skeleton className="h-10 w-64" />
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {Array.from({ length: 8 }).map((_, i) => (
             <Skeleton key={i} className="aspect-video rounded-lg" />
           ))}
@@ -64,7 +66,7 @@ export function ContentGallery() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-semibold">Content Library</h2>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-muted-foreground text-sm">
             {filteredFiles.length} file{filteredFiles.length !== 1 ? "s" : ""}
             {selectedFilter !== "all" && ` in ${selectedFilter}`}
           </p>
@@ -87,7 +89,7 @@ export function ContentGallery() {
           </EmptyHeader>
         </Empty>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {filteredFiles.map((file) => (
             <ContentCard
               key={file.key}
@@ -101,4 +103,3 @@ export function ContentGallery() {
     </div>
   );
 }
-
