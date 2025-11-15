@@ -2,8 +2,8 @@
 
 import { Card } from "@/components/ui/card";
 import { ContentActions } from "./ContentActions";
-import type { FileInfo } from "@/lib/types/storage";
-import { AssetType } from "@/lib/types/storage";
+import type { FileInfo } from "@/types/storage";
+import { AssetType } from "@/types/storage";
 import Image from "next/image";
 import { formatBytes, getAssetTypeFromKey } from "./utils";
 
@@ -28,7 +28,7 @@ export function ContentCard({
 
   return (
     <Card className="overflow-hidden">
-      <div className="relative aspect-video bg-muted">
+      <div className="bg-muted relative aspect-video">
         {isImage && (
           <Image
             src={file.presigned_url}
@@ -42,31 +42,31 @@ export function ContentCard({
           <video
             src={file.presigned_url}
             controls
-            className="w-full h-full object-cover"
+            className="h-full w-full object-cover"
           />
         )}
         {isAudio && (
-          <div className="flex items-center justify-center h-full">
+          <div className="flex h-full items-center justify-center">
             <audio src={file.presigned_url} controls className="w-full" />
           </div>
         )}
         {!isImage && !isVideo && !isAudio && (
-          <div className="flex items-center justify-center h-full text-muted-foreground">
+          <div className="text-muted-foreground flex h-full items-center justify-center">
             <span>Preview not available</span>
           </div>
         )}
         {isFinal && (
-          <div className="absolute top-2 right-2 bg-primary text-primary-foreground px-2 py-1 rounded text-xs font-semibold">
+          <div className="bg-primary text-primary-foreground absolute top-2 right-2 rounded px-2 py-1 text-xs font-semibold">
             Final
           </div>
         )}
       </div>
-      <div className="p-4 space-y-2">
+      <div className="space-y-2 p-4">
         <div>
-          <p className="font-medium text-sm truncate" title={fileName}>
+          <p className="truncate text-sm font-medium" title={fileName}>
             {fileName}
           </p>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-muted-foreground text-xs">
             {formatBytes(file.size)}
           </p>
         </div>
@@ -80,5 +80,3 @@ export function ContentCard({
     </Card>
   );
 }
-
-

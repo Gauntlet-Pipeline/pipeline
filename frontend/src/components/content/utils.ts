@@ -2,7 +2,7 @@
  * Utility functions for content components.
  */
 
-import { AssetType } from "@/lib/types/storage";
+import { AssetType } from "@/types/storage";
 
 /**
  * Format bytes to human-readable string.
@@ -24,19 +24,17 @@ export function formatBytes(bytes: number): string {
 export function getAssetTypeFromKey(key: string): AssetType | null {
   const parts = key.split("/");
   const outputIndex = parts.indexOf("output");
-  
+
   if (outputIndex === -1 || outputIndex >= parts.length - 1) {
     return null;
   }
-  
+
   const assetType = parts[outputIndex + 1]!;
   const assetTypeValues = Object.values(AssetType) as string[];
-  
+
   if (assetTypeValues.includes(assetType)) {
     return assetType as AssetType;
   }
-  
+
   return null;
 }
-
-

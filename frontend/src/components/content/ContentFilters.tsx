@@ -1,7 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
-import { AssetType } from "@/lib/types/storage";
+import { AssetType } from "@/types/storage";
 import { cn } from "@/lib/utils";
 
 interface ContentFiltersProps {
@@ -31,7 +31,7 @@ export function ContentFilters({
           onClick={() => onFilterChange(filter.value)}
           className={cn(
             "transition-all",
-            selectedFilter === filter.value && "shadow-sm"
+            selectedFilter === filter.value && "shadow-sm",
           )}
         >
           {filter.label}
@@ -40,5 +40,3 @@ export function ContentFilters({
     </div>
   );
 }
-
-
