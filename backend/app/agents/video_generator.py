@@ -356,8 +356,10 @@ Create scene-specific prompts for each image view."""
             motion_bucket_id = max(1, min(255, motion_bucket_id))  # Clamp to valid range
 
             # Choose frames based on duration
-            # 14 frames ≈ 3s, 25 frames ≈ 5s at 6fps default
+            # 14 frames = 2.33s, 25 frames = 4.17s at 6fps
             video_length = "14_frames_with_svd" if duration <= 3 else "25_frames_with_svd_xt"
+            num_frames = 14 if video_length == "14_frames_with_svd" else 25
+            fps = 6  # SVD default FPS
 
             model_input = {
                 "input_image": image_url,  # SVD expects 'input_image' not 'image'
@@ -366,7 +368,7 @@ Create scene-specific prompts for each image view."""
                 "decoding_t": 14,   # Decoding steps
                 "video_length": video_length,
                 "sizing_strategy": "maintain_aspect_ratio",
-                "frames_per_second": 6  # SVD default FPS
+                "frames_per_second": fps
             }
 
             logger.debug(
@@ -395,13 +397,17 @@ Create scene-specific prompts for each image view."""
                 f"[{session_id}] Clip {index + 1} generated in {generation_time:.2f}s"
             )
 
+            # Calculate actual duration: frames / fps
+            actual_duration = round(num_frames / fps, 2)
+
             return {
                 "id": f"clip_{uuid.uuid4().hex[:8]}",
                 "url": str(video_url),
                 "source_image_id": source_image_id,
-                "duration": duration,
+                "duration": actual_duration,  # Calculated from num_frames / fps
+                "num_frames": num_frames,
                 "resolution": "1024x576",
-                "fps": 6,  # SVD outputs 6 fps by default
+                "fps": fps,
                 "cost": cost,
                 "generation_time": generation_time,
                 "model": model,
