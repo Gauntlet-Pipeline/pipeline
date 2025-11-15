@@ -1,45 +1,19 @@
 /**
  * tRPC router for storage/file management.
  *
- * Proxies requests to the backend REST API with proper authentication.
+ * Directly accesses S3 without going through FastAPI backend.
  */
 
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 
 import { createTRPCRouter, protectedProcedure } from "@/server/api/trpc";
-import { getBackendToken } from "@/lib/auth-token";
-import { env } from "@/env";
 import type { FileListResponse, PresignedUrlResponse } from "@/types/storage";
-
-/**
- * Helper to make authenticated requests to backend API.
- */
-async function fetchWithAuth(
-  endpoint: string,
-  session: { user?: { email?: string | null } | null } | null,
-  options: RequestInit = {},
-): Promise<Response> {
-  const token = await getBackendToken(session);
-
-  if (!token) {
-    throw new TRPCError({
-      code: "UNAUTHORIZED",
-      message: "Not authenticated with backend",
-    });
-  }
-
-  const url = `${env.NEXT_PUBLIC_API_URL}${endpoint}`;
-
-  return fetch(url, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-      ...options.headers,
-    },
-  });
-}
+import {
+  listUserFiles,
+  deleteUserFile,
+  getPresignedUrl,
+} from "@/server/services/storage";
 
 export const storageRouter = createTRPCRouter({
   /**
@@ -55,31 +29,28 @@ export const storageRouter = createTRPCRouter({
       }),
     )
     .query(async ({ input, ctx }): Promise<FileListResponse> => {
-      const params = new URLSearchParams({
-        folder: input.folder,
-        limit: input.limit.toString(),
-        offset: input.offset.toString(),
-      });
-
-      if (input.asset_type) {
-        params.append("asset_type", input.asset_type);
-      }
-
-      const response = await fetchWithAuth(
-        `/api/storage/files?${params.toString()}`,
-        ctx.session,
-      );
-
-      if (!response.ok) {
-        const errorText = await response.text();
+      if (!ctx.session?.user?.id) {
         throw new TRPCError({
-          code:
-            response.status === 401 ? "UNAUTHORIZED" : "INTERNAL_SERVER_ERROR",
-          message: `Failed to list files: ${errorText}`,
+          code: "UNAUTHORIZED",
+          message: "User not authenticated",
         });
       }
 
-      return (await response.json()) as FileListResponse;
+      try {
+        const result = await listUserFiles(ctx.session.user.id, input.folder, {
+          asset_type: input.asset_type,
+          limit: input.limit,
+          offset: input.offset,
+        });
+
+        return result;
+      } catch (error) {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message:
+            error instanceof Error ? error.message : "Failed to list files",
+        });
+      }
     }),
 
   /**
@@ -91,37 +62,24 @@ export const storageRouter = createTRPCRouter({
         file_key: z.string(),
       }),
     )
-    .mutation(
-      async ({
-        input,
-        ctx,
-      }): Promise<{ status: string; message: string; key: string }> => {
-        const response = await fetchWithAuth(
-          `/api/storage/files/${encodeURIComponent(input.file_key)}`,
-          ctx.session,
-          {
-            method: "DELETE",
-          },
-        );
+    .mutation(async ({ input, ctx }) => {
+      if (!ctx.session?.user?.id) {
+        throw new TRPCError({
+          code: "UNAUTHORIZED",
+          message: "User not authenticated",
+        });
+      }
 
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new TRPCError({
-            code:
-              response.status === 401
-                ? "UNAUTHORIZED"
-                : "INTERNAL_SERVER_ERROR",
-            message: `Failed to delete file: ${errorText}`,
-          });
-        }
-
-        return (await response.json()) as {
-          status: string;
-          message: string;
-          key: string;
-        };
-      },
-    ),
+      try {
+        return await deleteUserFile(ctx.session.user.id, input.file_key);
+      } catch (error) {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message:
+            error instanceof Error ? error.message : "Failed to delete file",
+        });
+      }
+    }),
 
   /**
    * Get a presigned URL for accessing a file.
@@ -134,24 +92,27 @@ export const storageRouter = createTRPCRouter({
       }),
     )
     .query(async ({ input, ctx }): Promise<PresignedUrlResponse> => {
-      const params = new URLSearchParams({
-        expires_in: input.expires_in.toString(),
-      });
-
-      const response = await fetchWithAuth(
-        `/api/storage/files/${encodeURIComponent(input.file_key)}/presigned-url?${params.toString()}`,
-        ctx.session,
-      );
-
-      if (!response.ok) {
-        const errorText = await response.text();
+      if (!ctx.session?.user?.id) {
         throw new TRPCError({
-          code:
-            response.status === 401 ? "UNAUTHORIZED" : "INTERNAL_SERVER_ERROR",
-          message: `Failed to get presigned URL: ${errorText}`,
+          code: "UNAUTHORIZED",
+          message: "User not authenticated",
         });
       }
 
-      return (await response.json()) as PresignedUrlResponse;
+      try {
+        return await getPresignedUrl(
+          ctx.session.user.id,
+          input.file_key,
+          input.expires_in,
+        );
+      } catch (error) {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Failed to get presigned URL",
+        });
+      }
     }),
 });
