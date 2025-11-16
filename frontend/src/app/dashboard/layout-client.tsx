@@ -2,7 +2,7 @@
 
 import { usePathname } from "next/navigation";
 import { SidebarInset } from "@/components/ui/sidebar";
-import { ChatPreview } from "@/components/layout/chat-preview";
+import { ChatPreview } from "@/components/chat/chat-preview";
 import {
   ResizablePanelGroup,
   ResizablePanel,
@@ -24,17 +24,21 @@ export function DashboardLayoutClient({
       {showDoublePanel ? (
         <ResizablePanelGroup direction="horizontal" className="h-full">
           <ResizablePanel defaultSize={20} minSize={20}>
-            <div className="m-2 flex h-full rounded-xl border">
-              <ChatPreview />
-            </div>
+            <ChatPreview />
           </ResizablePanel>
-          <ResizableHandle withHandle />
-          <ResizablePanel defaultSize={80} minSize={70}>
-            <div className="flex h-full flex-col">{children}</div>
+          <ResizableHandle />
+          <ResizablePanel defaultSize={80} minSize={70} className="p-2">
+            <div className="flex h-full flex-col rounded-xl border">
+              {children}
+            </div>
           </ResizablePanel>
         </ResizablePanelGroup>
       ) : (
-        <div className="flex h-full flex-col">{children}</div>
+        <div className="p-2">
+          <div className="flex h-full flex-col rounded-xl border">
+            {children}
+          </div>
+        </div>
       )}
     </SidebarInset>
   );
