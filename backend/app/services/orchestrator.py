@@ -2,10 +2,10 @@
 Video Generation Orchestrator - Coordinates all microservices.
 
 This is the CRITICAL PATH component that unblocks the entire team.
-Updated by Person B to integrate Prompt Parser and Batch Image Generator agents.
+Updated to integrate script-based image generation workflow.
 """
 from sqlalchemy.orm import Session
-from app.models.database import Session as SessionModel, Asset, GenerationCost
+from app.models.database import Session as SessionModel, Asset, GenerationCost, Script
 from app.services.websocket_manager import WebSocketManager
 from app.agents.base import AgentInput
 from app.agents.prompt_parser import PromptParserAgent
@@ -68,88 +68,85 @@ class VideoGenerationOrchestrator:
         db: Session,
         session_id: str,
         user_id: int,
-        user_prompt: str,
+        script_id: str,
         options: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Generate images using Flux via Replicate.
+        Generate images from a video script.
 
-        Integrated by Person B with Prompt Parser and Batch Image Generator agents.
+        New workflow: Receives a script from the database, generates 2-3 images
+        per script part (hook, concept, process, conclusion), uploads to S3,
+        and returns micro_scenes structure.
 
         Args:
             db: Database session
             session_id: Session ID for tracking
-            user_prompt: User's prompt for image generation
-            options: Additional options (num_images, model, style_keywords, etc.)
+            user_id: User ID making the request
+            script_id: ID of the script in the database
+            options: Additional options (model, images_per_part, etc.)
 
         Returns:
-            Dict containing status, generated images, and cost information
+            Dict containing status, micro_scenes, and cost information
         """
         try:
-            # Validate agents are initialized
-            if not self.prompt_parser or not self.image_generator:
-                raise ValueError("AI agents not initialized - check REPLICATE_API_KEY")
+            # Validate image generator is initialized
+            if not self.image_generator:
+                raise ValueError("Image generator not initialized - check REPLICATE_API_KEY")
+
+            # Fetch script from database
+            script = db.query(Script).filter(Script.id == script_id).first()
+            if not script:
+                raise ValueError(f"Script {script_id} not found")
+
+            # Verify ownership
+            if script.user_id != user_id:
+                raise ValueError("Unauthorized: Script does not belong to this user")
 
             # Create or update session in database
             session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
-            if session:
+            if not session:
+                session = SessionModel(
+                    id=session_id,
+                    user_id=user_id,
+                    status="generating_images",
+                    prompt=f"Script-based generation: {script_id}",
+                    options=options
+                )
+                db.add(session)
+            else:
                 session.status = "generating_images"
-                session.prompt = user_prompt
+                session.prompt = f"Script-based generation: {script_id}"
                 session.options = options
-                db.commit()
+            db.commit()
 
-            # Stage 1: Prompt Parsing
-            await self.websocket_manager.broadcast_status(
-                session_id,
-                status="prompt_parsing",
-                progress=10,
-                details="Analyzing your prompt with AI..."
-            )
+            # Build script object for image generator
+            script_data = {
+                "hook": script.hook,
+                "concept": script.concept,
+                "process": script.process,
+                "conclusion": script.conclusion
+            }
 
-            logger.info(f"[{session_id}] Starting prompt parsing")
-
-            prompt_parser_input = AgentInput(
-                session_id=session_id,
-                data={
-                    "user_prompt": user_prompt,
-                    "options": options or {}
-                }
-            )
-
-            prompt_result = await self.prompt_parser.process(prompt_parser_input)
-
-            if not prompt_result.success:
-                raise ValueError(f"Prompt parsing failed: {prompt_result.error}")
-
-            # Track cost in database
-            self._record_cost(
-                db,
-                session_id,
-                agent="prompt_parser",
-                model="meta-llama-3-70b",
-                cost=prompt_result.cost,
-                duration=prompt_result.duration
-            )
-
-            # Stage 2: Image Generation
-            num_images = len(prompt_result.data["image_prompts"])
+            # Stage 1: Image Generation
+            images_per_part = options.get("images_per_part", 2) if options else 2
             await self.websocket_manager.broadcast_status(
                 session_id,
                 status="image_generation",
-                progress=30,
-                details=f"Generating {num_images} images with AI..."
+                progress=20,
+                details=f"Generating {images_per_part} images per script part with AI..."
             )
 
             logger.info(
-                f"[{session_id}] Generating {num_images} images with "
+                f"[{session_id}] Generating {images_per_part} images per part with "
                 f"{options.get('model', 'flux-schnell') if options else 'flux-schnell'}"
             )
 
             image_gen_input = AgentInput(
                 session_id=session_id,
                 data={
-                    "image_prompts": prompt_result.data["image_prompts"],
-                    "model": options.get("model", "flux-schnell") if options else "flux-schnell"
+                    "script": script_data,
+                    "model": options.get("model", "flux-schnell") if options else "flux-schnell",
+                    "images_per_part": images_per_part
                 }
             )
 
@@ -168,81 +165,94 @@ class VideoGenerationOrchestrator:
                 duration=image_result.duration
             )
 
-            # Store generated images in database
-            # First upload to S3 for permanent storage
-            images = image_result.data["images"]
-            for i, img_data in enumerate(images):
-                # Generate unique asset ID
-                asset_id = f"img_{uuid.uuid4().hex[:12]}"
+            # Stage 2: Upload images to S3
+            await self.websocket_manager.broadcast_status(
+                session_id,
+                status="uploading_images",
+                progress=60,
+                details="Uploading images to storage..."
+            )
 
-                # Download from Replicate and upload to S3
-                try:
-                    s3_result = await self.storage_service.download_and_upload(
-                        replicate_url=img_data["url"],
-                        asset_type="image",
+            micro_scenes = image_result.data["micro_scenes"]
+
+            # Upload all images to S3 and update URLs
+            for part_name in ["hook", "concept", "process", "conclusion"]:
+                images = micro_scenes[part_name]["images"]
+
+                for i, img_data in enumerate(images):
+                    # Generate unique asset ID
+                    asset_id = f"img_{part_name}_{i}_{uuid.uuid4().hex[:8]}"
+
+                    # Download from Replicate and upload to S3
+                    try:
+                        s3_result = await self.storage_service.download_and_upload(
+                            replicate_url=img_data["image"],
+                            asset_type="image",
+                            session_id=session_id,
+                            asset_id=asset_id,
+                            user_id=user_id
+                        )
+                        # Update image URL to S3 URL
+                        img_data["image"] = s3_result["url"]
+                        logger.info(f"[{session_id}] {part_name} image {i+1} uploaded to S3")
+                    except Exception as e:
+                        # Keep Replicate URL if S3 upload fails
+                        logger.warning(
+                            f"[{session_id}] S3 upload failed for {part_name} image {i+1}, "
+                            f"using Replicate URL: {e}"
+                        )
+
+                    # Store in database
+                    asset = Asset(
                         session_id=session_id,
-                        asset_id=asset_id,
-                        user_id=user_id
+                        type="image",
+                        url=img_data["image"],
+                        approved=False,
+                        asset_metadata={
+                            "script_part": part_name,
+                            "part_index": i,
+                            "asset_id": asset_id,
+                            **img_data["metadata"]
+                        }
                     )
-                    # Use S3 URL instead of temporary Replicate URL
-                    storage_url = s3_result["url"]
-                    logger.info(f"[{session_id}] Image {i+1} uploaded to S3: {storage_url}")
-                except Exception as e:
-                    # Fall back to Replicate URL if S3 upload fails
-                    logger.warning(f"[{session_id}] S3 upload failed for image {i+1}, using Replicate URL: {e}")
-                    storage_url = img_data["url"]
-
-                asset = Asset(
-                    # id is auto-increment, don't specify
-                    session_id=session_id,
-                    type="image",  # 'type' column not 'asset_type'
-                    url=storage_url,  # S3 URL or fallback Replicate URL
-                    approved=False,  # 'approved' not 'user_selected'
-                    asset_metadata={  # 'asset_metadata' not 'metadata'
-                        "view_type": img_data["view_type"],
-                        "seed": img_data["seed"],
-                        "model": img_data["model"],
-                        "cost": img_data["cost"],
-                        "duration": img_data["duration"],
-                        "asset_id": asset_id
-                    }
-                )
-                db.add(asset)
+                    db.add(asset)
 
             db.commit()
 
             # Update session status
-            if session:
-                session.status = "reviewing_images"
-                db.commit()
+            session.status = "images_ready"
+            db.commit()
 
             # Final progress update
-            total_cost = prompt_result.cost + image_result.cost
+            total_cost = image_result.cost
             await self.websocket_manager.broadcast_status(
                 session_id,
                 status="images_ready",
                 progress=100,
-                details=f"Generated {len(images)} images! Cost: ${total_cost:.3f}"
+                details=f"Generated images for all script parts! Cost: ${total_cost:.3f}"
             )
 
             logger.info(
-                f"[{session_id}] Image generation complete: "
-                f"{len(images)} images, ${total_cost:.3f}"
+                f"[{session_id}] Script-based image generation complete: ${total_cost:.3f}"
             )
 
+            # Build response with micro_scenes structure
             return {
                 "status": "success",
                 "session_id": session_id,
-                "images": images,
-                "total_cost": total_cost,
-                "product_category": prompt_result.data["product_category"],
-                "style_keywords": prompt_result.data["style_keywords"]
+                "micro_scenes": {
+                    "hook": micro_scenes["hook"],
+                    "concept": micro_scenes["concept"],
+                    "process": micro_scenes["process"],
+                    "conclusion": micro_scenes["conclusion"],
+                    "cost": str(total_cost)
+                }
             }
 
         except Exception as e:
             logger.error(f"[{session_id}] Image generation failed: {e}")
 
-            # Update session with error (query again since it might not be in scope)
+            # Update session with error
             session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
             if session:
                 session.status = "failed"

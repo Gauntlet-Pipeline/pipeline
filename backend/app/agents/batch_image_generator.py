@@ -1,17 +1,17 @@
 """
 Batch Image Generator Agent
-Person B - Hours 4-8: Batch Image Generation
 
-Purpose: Generate multiple product images in parallel using structured prompts
-from Prompt Parser Agent, ensuring visual consistency via seed control.
+Purpose: Generate multiple images for video scripts in parallel.
+Each script part (hook, concept, process, conclusion) gets 2-3 images
+with visual guidance from the script.
 
-Based on PRD Section 4.3.
+Based on PRD Section 4.3 - Updated for script-based generation.
 """
 
 import time
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Dict, List, Any
 import replicate
 
 from app.agents.base import AgentInput, AgentOutput
@@ -21,10 +21,10 @@ logger = logging.getLogger(__name__)
 
 class BatchImageGeneratorAgent:
     """
-    Generates multiple product images in parallel using AI image generation.
+    Generates multiple images in parallel for video script parts.
 
-    Uses Flux-Pro or SDXL via Replicate to generate consistent product
-    images from structured prompts.
+    Uses Flux or SDXL via Replicate to generate 2-3 images per script part
+    (hook, concept, process, conclusion) based on visual guidance.
     """
 
     def __init__(self, replicate_api_key: str):
@@ -55,26 +55,33 @@ class BatchImageGeneratorAgent:
 
     async def process(self, input: AgentInput) -> AgentOutput:
         """
-        Generate multiple images in parallel from structured prompts.
+        Generate images for each part of a video script.
 
         Args:
             input: AgentInput containing:
-                - data["image_prompts"]: List of prompt objects from Prompt Parser
+                - data["script"]: Script object with {hook, concept, process, conclusion}
                 - data["model"]: Model to use ("flux-pro", "flux-dev", "flux-schnell", "sdxl")
+                - data["images_per_part"]: Number of images per script part (default: 2)
 
         Returns:
             AgentOutput containing:
-                - data["images"]: List of generated image objects with URLs
-                - data["total_cost"]: Total cost for all images
-                - cost: Total cost (same as data["total_cost"])
+                - data["micro_scenes"]: {
+                    hook: {images: [{image: url, metadata: {...}}]},
+                    concept: {images: [{image: url, metadata: {...}}]},
+                    process: {images: [{image: url, metadata: {...}}]},
+                    conclusion: {images: [{image: url, metadata: {...}}]},
+                  }
+                - data["cost"]: Total cost for all images
+                - cost: Total cost (same as data["cost"])
                 - duration: Total time taken
         """
         try:
             start_time = time.time()
 
             # Extract input parameters
-            image_prompts = input.data["image_prompts"]
-            model_name = input.data.get("model", "flux-schnell")  # Default to schnell for testing
+            script = input.data["script"]
+            model_name = input.data.get("model", "flux-schnell")  # Default to schnell
+            images_per_part = input.data.get("images_per_part", 2)
 
             if model_name not in self.models:
                 raise ValueError(
@@ -83,47 +90,68 @@ class BatchImageGeneratorAgent:
                 )
 
             logger.info(
-                f"[{input.session_id}] Generating {len(image_prompts)} images "
+                f"[{input.session_id}] Generating {images_per_part} images per script part "
                 f"with {model_name}"
             )
 
-            # Generate images in parallel
-            tasks = []
-            for i, prompt_data in enumerate(image_prompts):
-                task = self._generate_single_image(
-                    session_id=input.session_id,
-                    model=model_name,
-                    prompt_data=prompt_data,
-                    index=i
-                )
-                tasks.append(task)
+            # Generate images for each script part in parallel
+            script_parts = ["hook", "concept", "process", "conclusion"]
+            all_tasks = []
+            task_metadata = []  # Track which task belongs to which part
+
+            for part_name in script_parts:
+                script_part = script[part_name]
+
+                for i in range(images_per_part):
+                    task = self._generate_image_for_script_part(
+                        session_id=input.session_id,
+                        model=model_name,
+                        script_part=script_part,
+                        part_name=part_name,
+                        image_index=i
+                    )
+                    all_tasks.append(task)
+                    task_metadata.append({"part_name": part_name, "index": i})
 
             # Execute all tasks concurrently
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*all_tasks, return_exceptions=True)
 
-            # Process results
-            images = []
+            # Organize results by script part
+            micro_scenes = {
+                "hook": {"images": []},
+                "concept": {"images": []},
+                "process": {"images": []},
+                "conclusion": {"images": []}
+            }
+
             total_cost = 0.0
             errors = []
 
             for i, result in enumerate(results):
+                part_name = task_metadata[i]["part_name"]
+
                 if isinstance(result, Exception):
-                    error_msg = f"Image {i} generation failed: {result}"
+                    error_msg = f"{part_name} image {task_metadata[i]['index']} failed: {result}"
                     logger.error(f"[{input.session_id}] {error_msg}")
                     errors.append(error_msg)
                     continue
 
-                images.append(result)
+                # Add image to corresponding script part
+                micro_scenes[part_name]["images"].append({
+                    "image": result["url"],
+                    "metadata": result["metadata"]
+                })
                 total_cost += result["cost"]
 
             duration = time.time() - start_time
 
-            # Determine success (at least one image generated)
-            success = len(images) > 0
+            # Check if we have at least some images generated
+            total_images = sum(len(part["images"]) for part in micro_scenes.values())
+            success = total_images > 0
 
             if success:
                 logger.info(
-                    f"[{input.session_id}] Generated {len(images)}/{len(image_prompts)} images "
+                    f"[{input.session_id}] Generated {total_images} total images "
                     f"in {duration:.2f}s (${total_cost:.2f})"
                 )
             else:
@@ -134,8 +162,8 @@ class BatchImageGeneratorAgent:
             return AgentOutput(
                 success=success,
                 data={
-                    "images": images,
-                    "total_cost": total_cost,
+                    "micro_scenes": micro_scenes,
+                    "cost": total_cost,
                     "failed_count": len(errors),
                     "errors": errors if errors else None
                 },
@@ -156,24 +184,26 @@ class BatchImageGeneratorAgent:
                 error=str(e)
             )
 
-    async def _generate_single_image(
+    async def _generate_image_for_script_part(
         self,
         session_id: str,
         model: str,
-        prompt_data: dict,
-        index: int
+        script_part: Dict[str, Any],
+        part_name: str,
+        image_index: int
     ) -> dict:
         """
-        Generate a single image via Replicate API.
+        Generate a single image for a script part via Replicate API.
 
         Args:
             session_id: Session ID for logging
             model: Model name to use
-            prompt_data: Prompt object with prompt, seed, etc.
-            index: Image index for logging
+            script_part: Script part object with {text, duration, key_concepts, visual_guidance}
+            part_name: Name of script part (hook, concept, process, conclusion)
+            image_index: Image index for this part (0-2)
 
         Returns:
-            Image result dict with URL, metadata, cost, duration
+            Dict with URL and metadata
 
         Raises:
             Exception: If image generation fails
@@ -183,15 +213,21 @@ class BatchImageGeneratorAgent:
         try:
             model_id = self.models[model]
 
+            # Create prompt from visual guidance and key concepts
+            visual_guidance = script_part.get("visual_guidance", "")
+            key_concepts = script_part.get("key_concepts", [])
+
+            # Build comprehensive prompt
+            prompt = self._build_prompt_from_script(visual_guidance, key_concepts, image_index)
+
             # Build model input based on model type
             if model.startswith("flux"):
-                model_input = self._build_flux_input(prompt_data)
+                model_input = self._build_flux_input_from_prompt(prompt)
             else:  # SDXL
-                model_input = self._build_sdxl_input(prompt_data)
+                model_input = self._build_sdxl_input_from_prompt(prompt)
 
             logger.debug(
-                f"[{session_id}] Generating image {index + 1} "
-                f"({prompt_data.get('view_type', 'unknown')} view)"
+                f"[{session_id}] Generating {part_name} image {image_index + 1}"
             )
 
             # Call Replicate API
@@ -210,68 +246,105 @@ class BatchImageGeneratorAgent:
             cost = self.costs[model]
 
             logger.debug(
-                f"[{session_id}] Image {index + 1} generated in {duration:.2f}s"
+                f"[{session_id}] {part_name} image {image_index + 1} generated in {duration:.2f}s"
             )
 
             return {
                 "url": str(image_url),
-                "view_type": prompt_data.get("view_type", "unknown"),
-                "seed": prompt_data.get("seed", 0),
                 "cost": cost,
-                "duration": duration,
-                "model": model,
-                "resolution": "1024x1024",
-                "prompt": prompt_data.get("prompt", "")[:100] + "..."  # Truncate for storage
+                "metadata": {
+                    "part_name": part_name,
+                    "image_index": image_index,
+                    "duration": duration,
+                    "model": model,
+                    "resolution": "1024x1024",
+                    "key_concepts": key_concepts,
+                    "visual_guidance": visual_guidance[:200],  # Truncate for storage
+                    "prompt_used": prompt[:200]  # Truncate for storage
+                }
             }
 
         except Exception as e:
             duration = time.time() - start
             logger.error(
-                f"[{session_id}] Image {index + 1} generation failed "
+                f"[{session_id}] {part_name} image {image_index + 1} generation failed "
                 f"after {duration:.2f}s: {e}"
             )
             raise
 
-    def _build_flux_input(self, prompt_data: dict) -> dict:
+    def _build_prompt_from_script(
+        self,
+        visual_guidance: str,
+        key_concepts: List[str],
+        image_index: int
+    ) -> str:
         """
-        Build input parameters for Flux models.
+        Build an image generation prompt from script visual guidance and key concepts.
 
         Args:
-            prompt_data: Prompt object from Prompt Parser
+            visual_guidance: Visual guidance from script part
+            key_concepts: List of key concepts to visualize
+            image_index: Index of this image (to add variation)
+
+        Returns:
+            Complete prompt string for image generation
+        """
+        # Base prompt from visual guidance
+        prompt = visual_guidance
+
+        # Add key concepts if provided
+        if key_concepts:
+            concepts_str = ", ".join(key_concepts)
+            prompt += f", featuring: {concepts_str}"
+
+        # Add variation based on image index
+        variations = [
+            ", cinematic lighting, high quality",
+            ", professional photography, detailed",
+            ", studio lighting, sharp focus"
+        ]
+        if image_index < len(variations):
+            prompt += variations[image_index]
+
+        return prompt
+
+    def _build_flux_input_from_prompt(self, prompt: str) -> dict:
+        """
+        Build input parameters for Flux models from a prompt string.
+
+        Args:
+            prompt: Complete prompt string
 
         Returns:
             Flux model input dict
         """
         return {
-            "prompt": prompt_data["prompt"],
-            "guidance": prompt_data.get("guidance_scale", 7.5),
+            "prompt": prompt,
+            "guidance": 7.5,
             "num_outputs": 1,
-            "aspect_ratio": "1:1",
+            "aspect_ratio": "16:9",  # Video format
             "output_format": "png",
             "output_quality": 100,
             "safety_tolerance": 2,
-            "seed": prompt_data.get("seed", 0)
+            "seed": 42  # Fixed seed for consistency
         }
 
-    def _build_sdxl_input(self, prompt_data: dict) -> dict:
+    def _build_sdxl_input_from_prompt(self, prompt: str) -> dict:
         """
-        Build input parameters for SDXL model.
+        Build input parameters for SDXL model from a prompt string.
 
         Args:
-            prompt_data: Prompt object from Prompt Parser
+            prompt: Complete prompt string
 
         Returns:
             SDXL model input dict
         """
         return {
-            "prompt": prompt_data["prompt"],
-            "negative_prompt": prompt_data.get(
-                "negative_prompt",
-                "blurry, distorted, low quality, watermark, text"
-            ),
-            "width": 1024,
-            "height": 1024,
-            "guidance_scale": prompt_data.get("guidance_scale", 7.5),
+            "prompt": prompt,
+            "negative_prompt": "blurry, distorted, low quality, watermark, text, labels",
+            "width": 1920,  # 16:9 aspect ratio
+            "height": 1080,
+            "guidance_scale": 7.5,
             "num_inference_steps": 50,
-            "seed": prompt_data.get("seed", 0)
+            "seed": 42  # Fixed seed for consistency
         }
