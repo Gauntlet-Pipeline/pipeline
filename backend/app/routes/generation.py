@@ -28,9 +28,10 @@ storage_service = StorageService()
 
 # Request/Response models
 class GenerateImagesRequest(BaseModel):
-    prompt: str
-    num_images: Optional[int] = 4
-    aspect_ratio: Optional[str] = "16:9"
+    session_id: str
+    script_id: str
+    model: Optional[str] = "flux-schnell"
+    images_per_part: Optional[int] = 2
 
 
 class ImageResponse(BaseModel):
@@ -38,10 +39,18 @@ class ImageResponse(BaseModel):
     approved: bool
 
 
+class MicroSceneResponse(BaseModel):
+    hook: Dict[str, Any]
+    concept: Dict[str, Any]
+    process: Dict[str, Any]
+    conclusion: Dict[str, Any]
+    cost: str
+
+
 class GenerateImagesResponse(BaseModel):
     session_id: str
     status: str
-    images: List[Dict[str, Any]]
+    micro_scenes: MicroSceneResponse
 
 
 class SaveApprovedImagesRequest(BaseModel):
@@ -100,68 +109,39 @@ async def generate_images(
     db: Session = Depends(get_db)
 ):
     """
-    Step 1: Generate images using Flux-Schnell via Replicate.
+    Step 1: Generate images from a video script.
 
     **Authentication:** Requires X-User-Email header from authenticated frontend.
 
-    Creates a new session and generates images based on user prompt using the Flux-Schnell model.
+    Takes a script ID from the database and generates 2-3 images per script part
+    (hook, concept, process, conclusion) based on visual guidance.
     Images are stored in S3 and tracked in the database.
 
     **Required Headers:**
     - `X-User-Email` (string): User's email from NextAuth session
 
     **Required Parameters:**
-    - `prompt` (string): Text description of images to generate
+    - `session_id` (string): Session ID for tracking this generation
+    - `script_id` (string): ID of the script in the database
 
     **Optional Parameters:**
-    - `num_images` (int): Number of images to generate (default: 4)
-    - `aspect_ratio` (string): Image aspect ratio (default: "16:9")
+    - `model` (string): Model to use ("flux-pro", "flux-dev", "flux-schnell", "sdxl") (default: "flux-schnell")
+    - `images_per_part` (int): Number of images per script part (default: 2)
 
     **Returns:**
-    - `session_id`: Unique identifier for this generation session
+    - `session_id`: Session ID for tracking
     - `status`: Generation status
-    - `images`: List of generated image URLs
+    - `micro_scenes`: Object with hook, concept, process, conclusion images and cost
     """
-    # Create new session
-    session_id = str(uuid.uuid4())
-    session = SessionModel(
-        id=session_id,
-        user_id=current_user.id,
-        status="pending",
-        prompt=request.prompt
-    )
-    db.add(session)
-    db.commit()
-
-    # Store prompt/config in S3 input folder
-    try:
-        config_data = {
-            "prompt": request.prompt,
-            "num_images": request.num_images,
-            "aspect_ratio": request.aspect_ratio,
-            "session_id": session_id,
-            "created_at": session.created_at.isoformat() if session.created_at else None
-        }
-        storage_service.upload_prompt_config(
-            user_id=current_user.id,
-            config_data=config_data,
-            session_id=session_id
-        )
-    except Exception as e:
-        # Log but don't fail if storage fails
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.warning(f"Failed to store prompt config: {e}")
-
-    # Call orchestrator to generate images
+    # Call orchestrator to generate images from script
     result = await orchestrator.generate_images(
         db=db,
-        session_id=session_id,
+        session_id=request.session_id,
         user_id=current_user.id,
-        user_prompt=request.prompt,
+        script_id=request.script_id,
         options={
-            "num_images": request.num_images,
-            "aspect_ratio": request.aspect_ratio
+            "model": request.model,
+            "images_per_part": request.images_per_part
         }
     )
 
@@ -173,9 +153,9 @@ async def generate_images(
         )
 
     return {
-        "session_id": session_id,
+        "session_id": request.session_id,
         "status": result["status"],
-        "images": result.get("images", [])
+        "micro_scenes": result["micro_scenes"]
     }
 
 

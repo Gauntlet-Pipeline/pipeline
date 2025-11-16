@@ -111,6 +111,32 @@ class GenerationCost(Base):
         return f"<GenerationCost(id={self.id}, service={self.service}, cost={self.cost})>"
 
 
+class Script(Base):
+    """Script model for video generation."""
+
+    __tablename__ = "scripts"
+
+    id = Column(String(255), primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    # Script structure with four parts
+    # Each part has: {text: str, duration: str, key_concepts: list[str], visual_guidance: str}
+    hook = Column(JSON, nullable=False)
+    concept = Column(JSON, nullable=False)
+    process = Column(JSON, nullable=False)
+    conclusion = Column(JSON, nullable=False)
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # Relationships
+    user = relationship("User")
+
+    def __repr__(self):
+        return f"<Script(id={self.id}, user_id={self.user_id})>"
+
+
 class WebSocketConnection(Base):
     """Track active WebSocket connections for real-time updates."""
 
