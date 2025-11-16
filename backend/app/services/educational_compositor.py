@@ -58,7 +58,9 @@ class EducationalCompositor:
         self,
         timeline: List[Dict[str, Any]],
         music_url: Optional[str] = None,
-        session_id: str = "unknown"
+        session_id: str = "unknown",
+        intro_padding: float = 0.0,
+        outro_padding: float = 0.0
     ) -> Dict[str, Any]:
         """
         Compose educational video from timeline of video clips/images and audio.
@@ -70,8 +72,11 @@ class EducationalCompositor:
                 - image_url: URL of the image (fallback if no video)
                 - audio_url: URL of the narration audio
                 - duration: Duration in seconds
+                - narration_duration: Original narration duration (for audio sync)
             music_url: Optional background music URL
             session_id: Session ID for logging
+            intro_padding: Seconds of padding before first segment
+            outro_padding: Seconds of padding after last segment
 
         Returns:
             Dict with output_path and duration
@@ -80,7 +85,7 @@ class EducationalCompositor:
             Exception: If composition fails
         """
         try:
-            logger.info(f"[{session_id}] Starting educational video composition with {len(timeline)} segments")
+            logger.info(f"[{session_id}] Starting educational video composition with {len(timeline)} segments (intro: {intro_padding}s, outro: {outro_padding}s)")
 
             # Step 1: Download all assets (videos or images + audio)
             segment_files = await self._download_segment_assets(timeline, session_id)
@@ -91,11 +96,13 @@ class EducationalCompositor:
             # Step 3: Concatenate video clips
             concatenated_video = await self._concatenate_clips(video_clips, session_id)
 
-            # Step 4: Add narration audio
+            # Step 4: Add narration audio with intro/outro padding
             video_with_audio = await self._add_narration(
                 concatenated_video,
                 segment_files,
-                session_id
+                session_id,
+                intro_padding=intro_padding,
+                outro_padding=outro_padding
             )
 
             # Step 5: Add background music if provided
@@ -103,7 +110,9 @@ class EducationalCompositor:
                 final_video = await self._add_background_music(
                     video_with_audio,
                     music_url,
-                    session_id
+                    session_id,
+                    segment_files,
+                    intro_padding
                 )
             else:
                 final_video = video_with_audio
@@ -179,7 +188,9 @@ class EducationalCompositor:
                     "video_path": video_path,
                     "image_path": image_path,
                     "audio_path": audio_path,
-                    "duration": segment["duration"]
+                    "duration": segment["duration"],
+                    "narration_duration": segment.get("narration_duration", segment["duration"]),
+                    "gap_after_narration": segment.get("gap_after_narration", 0.0)
                 })
 
         logger.info(f"[{session_id}] Downloaded assets for {len(segment_files)} segments")
@@ -315,37 +326,62 @@ class EducationalCompositor:
         self,
         video_path: str,
         segment_files: List[Dict[str, str]],
-        session_id: str
+        session_id: str,
+        intro_padding: float = 0.0,
+        outro_padding: float = 0.0
     ) -> str:
         """
-        Add narration audio to video.
+        Add narration audio to video with optional intro/outro padding.
 
         Args:
             video_path: Path to video file
             segment_files: List of segment files with audio paths
             session_id: Session ID
+            intro_padding: Delay audio start by this many seconds
+            outro_padding: Add silence after audio ends
 
         Returns:
             Path to video with narration
         """
-        logger.debug(f"[{session_id}] Adding narration audio")
+        logger.debug(f"[{session_id}] Adding narration audio (intro: {intro_padding}s, outro: {outro_padding}s)")
 
-        # Concatenate all audio files
-        audio_concat_file = os.path.join(self.work_dir, f"{session_id}_audio_concat.txt")
-        with open(audio_concat_file, 'w') as f:
-            for segment in segment_files:
-                f.write(f"file '{segment['audio_path']}'\n")
+        # Build audio with gaps using FFmpeg filter
+        # Create a filter that concatenates audio segments with silence in between
+        filter_parts = []
+        current_time = intro_padding  # Start after intro padding
 
-        # Concatenate audio
-        combined_audio = os.path.join(self.work_dir, f"{session_id}_narration.mp3")
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", audio_concat_file,
-            "-c", "copy",
+        for i, segment in enumerate(segment_files):
+            gap = segment.get('gap_after_narration', 0.0)
+
+            # Add this audio segment with adelay to position it at the right time
+            delay_ms = int(current_time * 1000)
+            filter_parts.append(f"[{i}:a]adelay={delay_ms}|{delay_ms}[a{i}]")
+
+            # Update time for next segment (current narration + gap)
+            narration_duration = segment.get('narration_duration', 5.0)
+            current_time += narration_duration + gap
+
+        # Mix all delayed audio tracks together
+        mix_inputs = ''.join(f"[a{i}]" for i in range(len(segment_files)))
+        filter_complex = ';'.join(filter_parts) + f";{mix_inputs}amix=inputs={len(segment_files)}:duration=longest:dropout_transition=0[mixed]"
+
+        # Build FFmpeg command - use WAV as intermediate format to avoid MP3 codec issues
+        combined_audio = os.path.join(self.work_dir, f"{session_id}_narration.wav")
+        cmd = ["ffmpeg", "-y"]
+
+        # Add all audio inputs
+        for segment in segment_files:
+            cmd.extend(["-i", segment['audio_path']])
+
+        # Add filter complex and output options
+        cmd.extend([
+            "-filter_complex", filter_complex,
+            "-map", "[mixed]",
+            "-t", str(current_time),  # Total duration including intro, all segments, and gaps
+            "-ac", "2",  # Stereo
+            "-ar", "44100",  # Sample rate
             combined_audio
-        ]
+        ])
 
         result = subprocess.run(
             cmd,
@@ -355,10 +391,10 @@ class EducationalCompositor:
         )
 
         if result.returncode != 0:
-            logger.error(f"[{session_id}] Audio concat failed: {result.stderr}")
-            raise Exception("Audio concatenation failed")
+            logger.error(f"[{session_id}] Audio concat with gaps failed: {result.stderr}")
+            raise Exception("Audio concatenation with gaps failed")
 
-        # Add audio to video
+        # Add audio to video (intro/outro padding already in combined_audio)
         output_path = os.path.join(self.work_dir, f"{session_id}_with_narration.mp4")
 
         cmd = [
@@ -368,7 +404,6 @@ class EducationalCompositor:
             "-c:v", "copy",
             "-c:a", "aac",
             "-b:a", "128k",
-            "-shortest",  # Match shortest stream duration
             "-movflags", "+faststart",
             output_path
         ]
@@ -387,7 +422,6 @@ class EducationalCompositor:
         logger.info(f"[{session_id}] Narration added successfully")
 
         # Clean up
-        os.remove(audio_concat_file)
         os.remove(combined_audio)
         os.remove(video_path)
 
@@ -397,20 +431,24 @@ class EducationalCompositor:
         self,
         video_path: str,
         music_url: str,
-        session_id: str
+        session_id: str,
+        segment_files: List[Dict[str, Any]] = None,
+        intro_padding: float = 0.0
     ) -> str:
         """
-        Add background music to video at low volume.
+        Add background music to video with dynamic ducking (lower volume during narration).
 
         Args:
             video_path: Path to video with narration
             music_url: URL of background music
             session_id: Session ID
+            segment_files: Segment timing info for ducking
+            intro_padding: Intro padding duration
 
         Returns:
             Path to final video with music
         """
-        logger.debug(f"[{session_id}] Adding background music")
+        logger.debug(f"[{session_id}] Adding background music with ducking")
 
         # Download music
         async with httpx.AsyncClient(timeout=300.0) as client:
@@ -421,20 +459,54 @@ class EducationalCompositor:
             with open(music_path, 'wb') as f:
                 f.write(music_response.content)
 
-        # Add music as background (volume 15%)
+        # Add music as background with ducking (lower volume during narration)
         output_path = os.path.join(self.work_dir, f"{session_id}_final.mp4")
 
+        # Build volume control for ducking
+        if segment_files and intro_padding is not None:
+            # Calculate narration time windows
+            volume_expr = "volume="
+            current_time = intro_padding
+
+            # Start with higher volume during intro
+            volume_parts = []
+
+            for segment in segment_files:
+                narration_duration = segment.get('narration_duration', 5.0)
+                gap = segment.get('gap_after_narration', 0.0)
+
+                # During narration: lower volume (0.08 = 8%)
+                # During gaps: higher volume (0.18 = 18%)
+                narration_start = current_time
+                narration_end = current_time + narration_duration
+                gap_end = narration_end + gap
+
+                # Lower volume during narration
+                volume_parts.append(f"if(between(t,{narration_start},{narration_end}),0.08,")
+
+                current_time += narration_duration + gap
+
+            # Close all the if statements and set default volume for gaps
+            volume_expr += ''.join(volume_parts) + "0.18" + ")" * len(volume_parts)
+
+            filter_complex = f"[1:a]{volume_expr}[music];[0:a][music]amix=inputs=2:duration=longest[aout]"
+        else:
+            # Fallback: constant volume
+            filter_complex = "[1:a]volume=0.12[music];[0:a][music]amix=inputs=2:duration=longest[aout]"
+
+        # Use -shortest to match video duration (not audio duration)
         cmd = [
             "ffmpeg", "-y",
             "-i", video_path,
             "-stream_loop", "-1",  # Loop music
             "-i", music_path,
-            "-filter_complex", "[1:a]volume=0.15[music];[0:a][music]amix=inputs=2:duration=first[aout]",
+            "-filter_complex", filter_complex,
             "-map", "0:v",
             "-map", "[aout]",
             "-c:v", "copy",
             "-c:a", "aac",
             "-b:a", "128k",
+            "-shortest",  # Match video stream duration
             "-movflags", "+faststart",
             output_path
         ]
