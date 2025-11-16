@@ -1076,7 +1076,8 @@ class VideoGenerationOrchestrator:
         self,
         db: Session,
         session_id: str,
-        user_id: int
+        user_id: int,
+        desired_duration: float = 60.0
     ) -> Dict[str, Any]:
         """
         Compose final educational video from generated images and audio.
@@ -1090,6 +1091,7 @@ class VideoGenerationOrchestrator:
             db: Database session
             session_id: Session ID containing generated assets
             user_id: User ID for ownership verification
+            desired_duration: Desired total video duration in seconds (default: 60.0)
 
         Returns:
             Dict with status, video_url, duration, segments_count
@@ -1145,6 +1147,34 @@ class VideoGenerationOrchestrator:
             parts = ["hook", "concept", "process", "conclusion"]
             timeline_segments = []
 
+            # First pass: Calculate total narration duration
+            total_narration_duration = 0.0
+            for part in parts:
+                audio_data = audio_by_part.get(part)
+                if audio_data:
+                    total_narration_duration += audio_data["duration"]
+
+            logger.info(f"[{session_id}] Total narration duration: {total_narration_duration}s, Desired duration: {desired_duration}s")
+
+            # Calculate how much to extend each clip
+            # Add intro/outro padding (2 seconds each)
+            intro_padding = 2.0
+            outro_padding = 2.0
+
+            # Available time for segments after padding
+            available_time = desired_duration - intro_padding - outro_padding
+
+            # Calculate extension factor
+            if total_narration_duration > 0:
+                extension_factor = available_time / total_narration_duration
+            else:
+                extension_factor = 1.0
+
+            # Don't shrink videos, only extend
+            extension_factor = max(extension_factor, 1.0)
+
+            logger.info(f"[{session_id}] Extension factor: {extension_factor:.2f}x")
+
             for part in parts:
                 # Get first approved image for this part (or first available)
                 image_url = images_by_part.get(part, [None])[0] if part in images_by_part else None
@@ -1153,11 +1183,19 @@ class VideoGenerationOrchestrator:
                 audio_data = audio_by_part.get(part)
 
                 if image_url and audio_data:
+                    # Extend the duration based on desired_duration
+                    extended_duration = audio_data["duration"] * extension_factor
+
+                    # Calculate the gap after narration (extended time - narration time)
+                    gap_after_narration = extended_duration - audio_data["duration"]
+
                     timeline_segments.append({
                         "part": part,
                         "image_url": image_url,
                         "audio_url": audio_data["url"],
-                        "duration": audio_data["duration"]
+                        "duration": extended_duration,
+                        "narration_duration": audio_data["duration"],  # Keep original for audio sync
+                        "gap_after_narration": gap_after_narration  # Gap to add after this narration
                     })
                 else:
                     logger.warning(f"[{session_id}] Missing assets for part: {part}")
@@ -1240,7 +1278,9 @@ class VideoGenerationOrchestrator:
             composition_result = await compositor.compose_educational_video(
                 timeline=video_clips,  # Now includes video URLs
                 music_url=music_url,
-                session_id=session_id
+                session_id=session_id,
+                intro_padding=intro_padding,
+                outro_padding=outro_padding
             )
 
             video_path = composition_result["output_path"]

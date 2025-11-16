@@ -335,6 +335,7 @@ class FinalizeScriptResponse(BaseModel):
 
 class ComposeVideoRequest(BaseModel):
     session_id: str
+    desired_duration: Optional[float] = 60.0  # Default to 60 seconds
 
 
 class ComposeVideoResponse(BaseModel):
@@ -512,7 +513,8 @@ async def compose_video(
     result = await orchestrator.compose_educational_video(
         db=db,
         session_id=request.session_id,
-        user_id=current_user.id
+        user_id=current_user.id,
+        desired_duration=request.desired_duration
     )
 
     if result["status"] == "error":
