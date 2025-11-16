@@ -79,6 +79,20 @@ class ComposeFinalVideoResponse(BaseModel):
     video_url: str
 
 
+class BuildNarrativeRequest(BaseModel):
+    topic: str
+    learning_objective: str
+    key_points: List[str]
+
+
+class BuildNarrativeResponse(BaseModel):
+    session_id: str
+    status: str
+    script: Dict[str, Any]
+    cost: float
+    duration: float
+
+
 @router.post("/generate-images", response_model=GenerateImagesResponse)
 async def generate_images(
     request: GenerateImagesRequest,
@@ -347,6 +361,105 @@ async def compose_final_video(
         "session_id": request.session_id,
         "status": result["status"],
         "video_url": result["video_url"]
+    }
+
+
+@router.post("/build-narrative", response_model=BuildNarrativeResponse)
+async def build_narrative(
+    request: BuildNarrativeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Build a narrative script for a 60-second video using AI.
+
+    **Authentication:** Requires X-User-Email header from authenticated frontend.
+
+    Creates a structured 4-part script (hook, concept, process, conclusion) with:
+    - Narration text for each part
+    - Clip duration suggestions
+    - Visual guidance for each scene
+    - Key concepts to highlight
+
+    **Required Headers:**
+    - `X-User-Email` (string): User's email from NextAuth session
+
+    **Required Parameters:**
+    - `topic` (string): Main topic/subject of the video
+    - `learning_objective` (string): What the viewer should learn/understand
+    - `key_points` (list): Array of key points to cover in the video
+
+    **Returns:**
+    - `session_id`: Unique identifier for this narrative session
+    - `status`: Generation status ("success" or "error")
+    - `script`: The complete 4-part script structure
+    - `cost`: Cost of the LLM call in USD
+    - `duration`: Time taken to generate the narrative in seconds
+
+    **Example Request:**
+    ```json
+    {
+      "topic": "How Photosynthesis Works",
+      "learning_objective": "Understand the basic process of how plants convert sunlight into energy",
+      "key_points": [
+        "Plants absorb sunlight through chlorophyll",
+        "Carbon dioxide and water are converted into glucose",
+        "Oxygen is released as a byproduct"
+      ]
+    }
+    ```
+
+    **Example Response:**
+    ```json
+    {
+      "session_id": "abc123...",
+      "status": "success",
+      "script": {
+        "hook": {
+          "narration": "Ever wonder how plants turn sunlight into food?",
+          "duration": 12,
+          "visual_guidance": "Close-up of sunlight hitting green leaves",
+          "key_concepts": ["photosynthesis", "sunlight"]
+        },
+        ...
+      },
+      "cost": 0.001,
+      "duration": 2.5
+    }
+    ```
+    """
+    # Validate inputs
+    if not request.topic or not request.topic.strip():
+        raise HTTPException(status_code=400, detail="Topic is required")
+
+    if not request.learning_objective or not request.learning_objective.strip():
+        raise HTTPException(status_code=400, detail="Learning objective is required")
+
+    if not request.key_points or len(request.key_points) == 0:
+        raise HTTPException(status_code=400, detail="At least one key point is required")
+
+    # Call orchestrator to build narrative
+    result = await orchestrator.build_narrative(
+        db=db,
+        user_id=current_user.id,
+        topic=request.topic,
+        learning_objective=request.learning_objective,
+        key_points=request.key_points
+    )
+
+    # Check if result is an error
+    if result["status"] == "error":
+        raise HTTPException(
+            status_code=500,
+            detail=result.get("message", "Narrative building failed")
+        )
+
+    return {
+        "session_id": result["session_id"],
+        "status": result["status"],
+        "script": result["script"],
+        "cost": result["cost"],
+        "duration": result["duration"]
     }
 
 
