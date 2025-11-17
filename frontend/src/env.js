@@ -22,6 +22,8 @@ export const env = createEnv({
     S3_BUCKET_NAME: z.string().optional(),
     AWS_REGION: z.string().default("us-east-1"),
     OPENAI_API_KEY: z.string().optional(),
+    GOOGLE_SEARCH_API_KEY: z.string().optional(),
+    GOOGLE_SEARCH_ENGINE_ID: z.string().optional(),
   },
 
   /**
@@ -52,6 +54,8 @@ export const env = createEnv({
     S3_BUCKET_NAME: process.env.S3_BUCKET_NAME,
     AWS_REGION: process.env.AWS_REGION,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    GOOGLE_SEARCH_API_KEY: process.env.GOOGLE_SEARCH_API_KEY,
+    GOOGLE_SEARCH_ENGINE_ID: process.env.GOOGLE_SEARCH_ENGINE_ID,
   },
   /**
    * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially

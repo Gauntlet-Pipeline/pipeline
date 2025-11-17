@@ -1,10 +1,10 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { useCallback, useEffect, useRef } from "react";
+import { useEffect, useRef, useMemo } from "react";
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
 import type { UIMessage, FileUIPart } from "ai";
+import { CustomChatTransport } from "@/lib/custom-chat-transport";
 import { useFactExtraction } from "@/components/fact-extraction/FactExtractionContext";
 import {
   Conversation,
@@ -31,12 +31,12 @@ import {
   PromptInputActionAddAttachments,
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input";
-import { parseFactsFromMessage } from "@/lib/factParsing";
 import { PROMPTS } from "@/components/chat/chatConstants";
 import { ChatMessage } from "@/components/chat/ChatMessage";
 import { useFactExtractionSubmit } from "@/components/chat/useFactExtractionSubmit";
 import { ChatMessageProvider } from "@/components/chat/chat-message-context";
 import { ScriptGenerationChainOfThought } from "@/components/generation/ScriptGenerationChainOfThought";
+import { useWorkflowSession } from "@/hooks/useWorkflowSession";
 import type { Fact } from "@/types";
 
 export function ChatPreview() {
@@ -44,38 +44,84 @@ export function ChatPreview() {
   const isCreatePage = pathname === "/dashboard/create";
   const factExtraction = useFactExtraction();
 
-  // Handle when AI finishes responding
-  const handleMessageFinish = useCallback(
-    (message: UIMessage) => {
-      if (!isCreatePage || factExtraction.confirmedFacts) return;
+  // Get workflow session for sessionId
+  const workflowSession = useWorkflowSession(factExtraction.sessionId);
 
-      const textPart = message.parts?.find(
-        (part): part is { type: "text"; text: string } => part.type === "text",
-      );
-
-      if (textPart?.text && message.role === "assistant") {
-        const facts = parseFactsFromMessage(textPart.text);
-        if (facts !== null && facts.length > 0) {
-          factExtraction.setExtractedFacts(facts);
-        } else {
-          // If no facts found, stop loading state
-          factExtraction.setIsExtracting?.(false);
-        }
-      }
-    },
-    [isCreatePage, factExtraction],
+  // Create custom transport with sessionId
+  const transport = useMemo(
+    () =>
+      new CustomChatTransport({
+        api: "/api/chat",
+        sessionId: workflowSession.sessionId ?? undefined,
+        onSessionCreated: (sessionId: string) => {
+          console.log(
+            "[ChatPreview] Setting session ID from server:",
+            sessionId,
+          );
+          workflowSession.setSessionId(sessionId);
+        },
+      }),
+    [workflowSession],
   );
 
+  // Update transport sessionId when it changes
+  useEffect(() => {
+    transport.setSessionId(workflowSession.sessionId ?? undefined);
+  }, [transport, workflowSession.sessionId]);
+
   // Use AI SDK's useChat hook for chat state management
-  const { messages, sendMessage, status, error } = useChat({
-    transport: new DefaultChatTransport({
-      api: "/api/chat",
-    }),
+  const { messages, sendMessage, status, error, setMessages } = useChat({
+    transport,
     onFinish: (event) => {
-      console.log(event.message);
-      handleMessageFinish(event.message);
+      console.log("[ChatPreview] onFinish called", {
+        messageId: event.message.id,
+        messageRole: event.message.role,
+        partsCount: event.message.parts?.length ?? 0,
+        parts: event.message.parts,
+        hasSession: !!workflowSession.sessionId,
+        sessionId: workflowSession.sessionId,
+      });
+      // Refresh session to get updated workflow state
+      // Only refresh if we have a session ID
+      if (workflowSession.sessionId) {
+        console.log("[ChatPreview] Refreshing session after message finish");
+        // Use a timeout to avoid excessive refetching
+        setTimeout(() => {
+          void workflowSession.refreshSession();
+        }, 500);
+      }
+    },
+    onError: (error) => {
+      console.error("[ChatPreview] Chat error:", error);
     },
   });
+
+  // Load conversation history when session loads
+  useEffect(() => {
+    if (
+      workflowSession.session?.conversationMessages &&
+      workflowSession.session.conversationMessages.length > 0 &&
+      messages.length === 0
+    ) {
+      // Convert conversation messages from DB to UIMessage format
+      const dbMessages: UIMessage[] =
+        workflowSession.session.conversationMessages.map((msg) => ({
+          id: msg.id,
+          role: msg.role,
+          parts: msg.parts
+            ? (msg.parts as UIMessage["parts"])
+            : [{ type: "text", text: msg.content }],
+          metadata: msg.metadata
+            ? (msg.metadata as Record<string, unknown>)
+            : undefined,
+        }));
+      setMessages(dbMessages);
+    }
+  }, [
+    workflowSession.session?.conversationMessages,
+    messages.length,
+    setMessages,
+  ]);
 
   // Use fact extraction submit hook
   const { handleFactExtractionSubmit } = useFactExtractionSubmit();
@@ -91,6 +137,8 @@ export function ChatPreview() {
       !prevConfirmedFactsRef.current
     ) {
       // Facts were just confirmed, send message
+      // The backend orchestrator will detect the confirmation message
+      // and move extractedFacts to confirmedFacts in the workflow context
       sendMessage({
         role: "user",
         parts: [

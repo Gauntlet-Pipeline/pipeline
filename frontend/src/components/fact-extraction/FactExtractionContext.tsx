@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import type { Fact } from "@/types";
-import { api } from "@/trpc/react";
+import { useWorkflowSession } from "@/hooks/useWorkflowSession";
 
 export interface FactExtractionContextValue {
   extractedFacts: Fact[];
@@ -35,86 +35,71 @@ export function FactExtractionProvider({ children }: { children: ReactNode }) {
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractionError, setExtractionError] = useState<string | null>(null);
   const [confirmedFacts, setConfirmedFacts] = useState<Fact[] | null>(null);
-  const [sessionId, setSessionId] = useState<string | null>(null);
   const [isGeneratingScript, setIsGeneratingScript] = useState(false);
 
-  // Query for latest session when confirmedFacts change
-  const { data: latestSession } = api.script.getLatestSession.useQuery(
-    undefined,
-    {
-      enabled: !!confirmedFacts && confirmedFacts.length > 0,
-      refetchInterval: (query) => {
-        // Poll every 2 seconds if we have confirmed facts but no sessionId yet
-        return query.state.data?.sessionId ? false : 2000;
-      },
-    },
-  );
+  // Use workflow session to get sessionId and load facts from session
+  const workflowSession = useWorkflowSession();
 
-  // Update sessionId when latest session is found
+  // Load facts from session data when session loads
   useEffect(() => {
-    if (latestSession?.sessionId) {
-      setSessionId(latestSession.sessionId);
-    }
-  }, [latestSession]);
-
-  const extractFactsFromInput = useCallback(
-    async (text: string, files: File[]) => {
-      setIsExtracting(true);
-      setExtractionError(null);
-
-      try {
-        // Dynamic imports to avoid SSR issues
-        const [{ extractTextFromPDF }, { extractFacts }, { fetchURLContent }] =
-          await Promise.all([
-            import("@/lib/extractPDF"),
-            import("@/lib/extractFacts"),
-            import("@/lib/fetchURL"),
-          ]);
-
-        let combinedText = text;
-
-        // Extract text from PDF files
-        for (const file of files) {
-          if (file.type === "application/pdf") {
-            try {
-              const pdfText = await extractTextFromPDF(file);
-              combinedText += "\n\n" + pdfText;
-            } catch (error) {
-              console.error("Error extracting PDF:", error);
-            }
-          }
-        }
-
-        // Extract text from URL if present
-        const urlPattern =
-          /(https?:\/\/[^\s]+|www\.[^\s]+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}[^\s]*)/;
-        const urlMatch = urlPattern.exec(text);
-        if (urlMatch?.[0]) {
-          try {
-            const urlText = await fetchURLContent(urlMatch[0]);
-            combinedText += "\n\n" + urlText;
-          } catch (error) {
-            console.error("Error fetching URL:", error);
-          }
-        }
-
-        // Extract facts from combined text
-        if (combinedText.trim()) {
-          const facts = extractFacts(combinedText);
-          setExtractedFacts(facts);
-        } else {
-          setExtractionError("No text content found to extract facts from.");
-        }
-      } catch (error) {
-        console.error("Error during fact extraction:", error);
-        setExtractionError(
-          error instanceof Error
-            ? error.message
-            : "Failed to extract facts. Please try again.",
+    if (workflowSession.session) {
+      // First check for extractedFacts (pending review) in workflow context
+      const workflowContext = workflowSession.session.workflowContext;
+      if (
+        workflowContext?.extractedFacts &&
+        workflowContext.extractedFacts.length > 0 &&
+        !workflowContext.confirmedFacts
+      ) {
+        // Facts are extracted but not yet confirmed
+        const sessionFacts: Fact[] = workflowContext.extractedFacts.map(
+          (f) => ({
+            concept: f.concept,
+            details: f.details,
+            confidence: 0.8, // Default confidence
+          }),
         );
-      } finally {
-        setIsExtracting(false);
+        setExtractedFacts(sessionFacts);
+        setConfirmedFacts(null); // Not confirmed yet
+        setIsExtracting(false); // Facts are loaded, stop loading state
       }
+      // If confirmedFacts exist (either in workflow context or session), use those
+      else if (
+        workflowContext?.confirmedFacts ||
+        workflowSession.session.confirmedFacts
+      ) {
+        const confirmedFactsData =
+          workflowContext?.confirmedFacts ||
+          workflowSession.session.confirmedFacts ||
+          [];
+        const sessionFacts: Fact[] = confirmedFactsData.map((f) => ({
+          concept: f.concept,
+          details: f.details,
+          confidence: 0.8, // Default confidence
+        }));
+        setExtractedFacts(sessionFacts);
+        setConfirmedFacts(sessionFacts);
+        setIsExtracting(false); // Facts are loaded, stop loading state
+      }
+    }
+  }, [
+    workflowSession.session?.workflowContext?.extractedFacts,
+    workflowSession.session?.workflowContext?.confirmedFacts,
+    workflowSession.session?.confirmedFacts,
+  ]);
+
+  // Update sessionId from workflow session
+  useEffect(() => {
+    if (workflowSession.sessionId) {
+      // SessionId is managed by workflow session
+    }
+  }, [workflowSession.sessionId]);
+
+  // Fact extraction is now handled by backend orchestrator
+  // This method is kept for backward compatibility but does nothing
+  const extractFactsFromInput = useCallback(
+    async (_text: string, _files: File[]) => {
+      // Backend handles fact extraction via orchestrator
+      // This is a no-op now
     },
     [],
   );
@@ -134,17 +119,20 @@ export function FactExtractionProvider({ children }: { children: ReactNode }) {
     setExtractionError(null);
   }, []);
 
-  const confirmFacts = useCallback(
-    async (facts: Fact[]) => {
-      setConfirmedFacts(facts);
-      // Store in localStorage
-      localStorage.setItem("facts_current", JSON.stringify(facts));
-      
-      // Add user message to chat when facts are confirmed
-      // This will be handled by a component that has access to chat context
-    },
-    [],
-  );
+  const confirmFacts = useCallback(async (facts: Fact[]) => {
+    setConfirmedFacts(facts);
+    // Facts will be saved to database by backend orchestrator
+    // when the confirmation message is processed
+    // The edited facts are included in the confirmation message
+  }, []);
+
+  // Determine if script is being generated based on workflow step
+  useEffect(() => {
+    const isGenerating =
+      workflowSession.currentStep === "script_generation" &&
+      !workflowSession.session?.generatedScript;
+    setIsGeneratingScript(isGenerating);
+  }, [workflowSession.currentStep, workflowSession.session?.generatedScript]);
 
   return (
     <FactExtractionContext.Provider
@@ -158,7 +146,7 @@ export function FactExtractionProvider({ children }: { children: ReactNode }) {
         clearFacts,
         confirmFacts,
         confirmedFacts,
-        sessionId,
+        sessionId: workflowSession.sessionId,
         isGeneratingScript,
         setIsGeneratingScript,
       }}

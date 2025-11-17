@@ -26,41 +26,52 @@ interface Segment {
 
 interface ScriptReviewPanelProps {
   topic?: string;
+  script?: unknown;
+  sessionId?: string | null;
 }
 
-export function ScriptReviewPanel({ topic = "Educational Content" }: ScriptReviewPanelProps) {
-  const { confirmedFacts, setIsGeneratingScript } = useFactExtraction();
+export function ScriptReviewPanel({
+  topic = "Educational Content",
+  script: scriptFromSession,
+  sessionId,
+}: ScriptReviewPanelProps) {
+  const { confirmedFacts } = useFactExtraction();
   const { sendMessage } = useChatMessage();
-  
+
   // sendMessage may be null if not in ChatMessageProvider context
   const [editableSegments, setEditableSegments] = useState<Segment[]>([]);
-  const [generatedScript, setGeneratedScript] = useState<{
-    script: unknown;
-    cost: number;
-    duration: number;
-  } | null>(null);
-  const [hasInitiatedGeneration, setHasInitiatedGeneration] = useState(false);
 
-  // Generate script when component mounts or facts change
-  const generateMutation = api.script.generate.useMutation({
-    onSuccess: (data) => {
-      setGeneratedScript(data);
-      setIsGeneratingScript(false);
-      if (data.script && typeof data.script === "object" && "segments" in data.script) {
-        setEditableSegments((data.script as { segments: Segment[] }).segments);
+  // Load script from session data
+  useEffect(() => {
+    if (scriptFromSession && typeof scriptFromSession === "object") {
+      const scriptObj = scriptFromSession as { segments?: Segment[] };
+      if (scriptObj.segments && Array.isArray(scriptObj.segments)) {
+        setEditableSegments(scriptObj.segments);
       }
-    },
-    onError: (error) => {
-      console.error("Script generation error:", error);
-      setHasInitiatedGeneration(false); // Allow retry on error
-      setIsGeneratingScript(false);
-    },
-  });
+    }
+  }, [scriptFromSession]);
+
+  // Query script from session if sessionId provided and no script passed
+  const { data: scriptData } = api.script.get.useQuery(
+    { sessionId: sessionId! },
+    {
+      enabled: !!sessionId && !scriptFromSession,
+    }
+  );
+
+  useEffect(() => {
+    if (scriptData?.script && typeof scriptData.script === "object") {
+      const scriptObj = scriptData.script as { segments?: Segment[] };
+      if (scriptObj.segments && Array.isArray(scriptObj.segments)) {
+        setEditableSegments(scriptObj.segments);
+      }
+    }
+  }, [scriptData]);
 
   const approveMutation = api.script.approve.useMutation({
     onSuccess: async () => {
       alert("Script approved! Visual generation coming in next phase.");
-      
+
       // Add user message to chat when script is approved
       if (sendMessage) {
         try {
@@ -80,53 +91,29 @@ export function ScriptReviewPanel({ topic = "Educational Content" }: ScriptRevie
     },
   });
 
-  useEffect(() => {
-    if (
-      confirmedFacts &&
-      confirmedFacts.length > 0 &&
-      !generatedScript &&
-      !hasInitiatedGeneration &&
-      !generateMutation.isPending
-    ) {
-      setHasInitiatedGeneration(true);
-      setIsGeneratingScript(true);
-      const facts = confirmedFacts.map((f) => ({
-        concept: f.concept,
-        details: f.details,
-      }));
-      generateMutation.mutate({
-        topic,
-        facts,
-        targetDuration: 60,
-      });
-    }
-  }, [confirmedFacts, topic, generatedScript, hasInitiatedGeneration, setIsGeneratingScript, generateMutation]);
-
   const handleApprove = async () => {
-    if (!generatedScript || !confirmedFacts) return;
+    if (!confirmedFacts || editableSegments.length === 0) return;
 
     const facts = confirmedFacts.map((f) => ({
       concept: f.concept,
       details: f.details,
     }));
 
-    // Use edited segments if available, otherwise use original script
-    const scriptToApprove = editableSegments.length > 0
-      ? {
-          ...(typeof generatedScript.script === "object" &&
-          generatedScript.script !== null
-            ? generatedScript.script
-            : {}),
-          segments: editableSegments,
-        }
-      : generatedScript.script;
+    // Use edited segments
+    const scriptToApprove = {
+      segments: editableSegments,
+      total_duration: editableSegments.reduce(
+        (sum, seg) => sum + seg.duration,
+        0
+      ),
+    };
 
     await approveMutation.mutateAsync({
       script: scriptToApprove,
       topic,
       facts,
-      cost: generatedScript.cost,
-      duration: generatedScript.duration,
+      cost: scriptData?.cost ?? 0,
+      duration: scriptData?.duration ?? 0,
     });
   };
 
@@ -138,7 +125,8 @@ export function ScriptReviewPanel({ topic = "Educational Content" }: ScriptRevie
     return null;
   }
 
-  if (generateMutation.isPending || !generatedScript) {
+  // Show loading if script is not available yet
+  if (!scriptFromSession && !scriptData && !editableSegments.length) {
     return (
       <Card>
         <CardHeader>

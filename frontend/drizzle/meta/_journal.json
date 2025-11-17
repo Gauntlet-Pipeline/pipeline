@@ -8,6 +8,20 @@
       "when": 1763336785767,
       "tag": "0000_loving_wolfpack",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1763353056482,
+      "tag": "0001_abandoned_paladin",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1763392831089,
+      "tag": "0002_friendly_betty_brant",
+      "breakpoints": true
     }
   ]
 }
