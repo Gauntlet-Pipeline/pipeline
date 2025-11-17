@@ -736,9 +736,9 @@ async def save_test_script(
         )
 
         logger.debug(f"Attempting to save script: {script.id}")
-        db.merge(script)
+        merged_script = db.merge(script)
         db.commit()
-        db.refresh(script)
+        db.refresh(merged_script)
         
         logger.info(f"Successfully saved script: {script.id}")
 
