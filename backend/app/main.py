@@ -4,7 +4,9 @@ Main FastAPI application for Gauntlet Pipeline Orchestrator.
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
+from fastapi.responses import FileResponse
 from app.config import get_settings
+import os
 
 # Import routes
 from app.routes import generation, sessions, storage
@@ -109,6 +111,15 @@ async def health_check():
             "websocket": "ready"
         }
     }
+
+
+@app.get("/test_ui.html")
+async def serve_test_ui():
+    """Serve the test UI HTML file."""
+    test_ui_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "test_ui.html")
+    if os.path.exists(test_ui_path):
+        return FileResponse(test_ui_path)
+    raise HTTPException(status_code=404, detail="test_ui.html not found")
 
 
 @app.websocket("/ws/{session_id}")
