@@ -175,13 +175,15 @@ class EducationalCompositor:
                     with open(image_path, 'wb') as f:
                         f.write(image_response.content)
 
-                # Download audio
-                audio_response = await client.get(segment["audio_url"])
-                audio_response.raise_for_status()
+                # Download audio (if available - may be None for clips after first in a part)
+                audio_path = None
+                if segment.get("audio_url"):
+                    audio_response = await client.get(segment["audio_url"])
+                    audio_response.raise_for_status()
 
-                audio_path = os.path.join(self.work_dir, f"{session_id}_seg_{i}_audio.mp3")
-                with open(audio_path, 'wb') as f:
-                    f.write(audio_response.content)
+                    audio_path = os.path.join(self.work_dir, f"{session_id}_seg_{i}_audio.mp3")
+                    with open(audio_path, 'wb') as f:
+                        f.write(audio_response.content)
 
                 segment_files.append({
                     "part": segment["part"],
@@ -347,30 +349,43 @@ class EducationalCompositor:
 
         # Build audio with gaps using FFmpeg filter
         # Create a filter that concatenates audio segments with silence in between
+        # Only process segments that have audio
+        segments_with_audio = [s for s in segment_files if s.get('audio_path')]
+
+        if not segments_with_audio:
+            logger.warning(f"[{session_id}] No audio segments to add, skipping narration")
+            return video_path  # Return original video without narration
+
         filter_parts = []
         current_time = intro_padding  # Start after intro padding
 
         for i, segment in enumerate(segment_files):
+            # Skip segments without audio
+            if not segment.get('audio_path'):
+                continue
+
             gap = segment.get('gap_after_narration', 0.0)
 
             # Add this audio segment with adelay to position it at the right time
+            # Use segment index in segments_with_audio for filter indexing
+            audio_index = segments_with_audio.index(segment)
             delay_ms = int(current_time * 1000)
-            filter_parts.append(f"[{i}:a]adelay={delay_ms}|{delay_ms}[a{i}]")
+            filter_parts.append(f"[{audio_index}:a]adelay={delay_ms}|{delay_ms}[a{audio_index}]")
 
             # Update time for next segment (current narration + gap)
             narration_duration = segment.get('narration_duration', 5.0)
             current_time += narration_duration + gap
 
         # Mix all delayed audio tracks together
-        mix_inputs = ''.join(f"[a{i}]" for i in range(len(segment_files)))
-        filter_complex = ';'.join(filter_parts) + f";{mix_inputs}amix=inputs={len(segment_files)}:duration=longest:dropout_transition=0[mixed]"
+        mix_inputs = ''.join(f"[a{i}]" for i in range(len(segments_with_audio)))
+        filter_complex = ';'.join(filter_parts) + f";{mix_inputs}amix=inputs={len(segments_with_audio)}:duration=longest:dropout_transition=0[mixed]"
 
         # Build FFmpeg command - use WAV as intermediate format to avoid MP3 codec issues
         combined_audio = os.path.join(self.work_dir, f"{session_id}_narration.wav")
         cmd = ["ffmpeg", "-y"]
 
-        # Add all audio inputs
-        for segment in segment_files:
+        # Add all audio inputs (only from segments with audio)
+        for segment in segments_with_audio:
             cmd.extend(["-i", segment['audio_path']])
 
         # Add filter complex and output options
@@ -466,7 +481,7 @@ class EducationalCompositor:
         # Simplified approach: Use constant low volume for music
         # The narration will naturally be louder, creating a ducking effect
         # This avoids complex nested if statements that can fail
-        filter_complex = "[1:a]volume=0.10[music];[0:a][music]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
+        filter_complex = "[1:a]volume=0.10[music];[0:a][music]amix=inputs=2:duration=longest[aout]"
 
         # Use -shortest to match video duration (not audio duration)
         cmd = [
