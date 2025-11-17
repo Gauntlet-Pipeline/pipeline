@@ -49,7 +49,7 @@ ssh -i "$SSH_KEY" $EC2_USER@$EC2_IP << EOF
 cat > /opt/pipeline/backend/.env << 'ENVFILE'
 # Database Configuration
 # TODO: Replace with your Neon PostgreSQL connection string
-DATABASE_URL=postgresql+psycopg://REPLACE_WITH_NEON_URL
+DATABASE_URL="postgresql://neondb_owner:npg_kZnmUstlWA26@ep-falling-meadow-adnv9yz9-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 
 # JWT Authentication
 JWT_SECRET_KEY=$JWT_SECRET
