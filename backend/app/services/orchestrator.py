@@ -129,9 +129,12 @@ class VideoGenerationOrchestrator:
         self.narrative_builder = NarrativeBuilderAgent(replicate_api_key) if replicate_api_key else None
         self.audio_pipeline = AudioPipelineAgent(openai_api_key) if openai_api_key else None
 
+        # Initialize storage service for S3 uploads
+        self.storage_service = StorageService()
+
         # Initialize Person C agents (Video Pipeline)
-        # VideoGeneratorAgent uses Veo 3.1 via Replicate
-        self.video_generator = VideoGeneratorAgent(replicate_api_key) if replicate_api_key else None
+        # VideoGeneratorAgent uses Veo 3.1 via Replicate and uploads clips to S3
+        self.video_generator = VideoGeneratorAgent(replicate_api_key, self.storage_service) if replicate_api_key else None
         
         # Initialize FFmpeg compositor (optional - only needed for video composition)
         try:
@@ -139,9 +142,6 @@ class VideoGenerationOrchestrator:
         except RuntimeError as e:
             logger.warning(f"FFmpeg not available: {e}. Video composition will not work.")
             self.ffmpeg_compositor = None
-
-        # Initialize storage service for S3 uploads
-        self.storage_service = StorageService()
 
     async def generate_images(
         self,
@@ -470,7 +470,8 @@ class VideoGenerationOrchestrator:
                     "approved_images": image_data_list,
                     "video_prompt": video_prompt,
                     "clip_duration": clip_config.get("clip_duration", 3.0) if clip_config else 3.0,  # Shorter clips for faster processing
-                    "model": clip_config.get("model", default_model) if clip_config else default_model
+                    "model": clip_config.get("model", default_model) if clip_config else default_model,
+                    "user_id": user_id  # Pass user_id for S3 upload in video_generator
                 }
             )
 
@@ -490,33 +491,17 @@ class VideoGenerationOrchestrator:
             )
 
             # Store generated clips in database
-            # First upload to S3 for permanent storage
+            # Clips are already uploaded to S3 by video_generator
             clips = video_result.data["clips"]
             for i, clip_data in enumerate(clips):
-                # Generate unique asset ID
-                asset_id = f"clip_{uuid.uuid4().hex[:12]}"
-
-                # Download from Replicate and upload to S3
-                try:
-                    s3_result = await self.storage_service.download_and_upload(
-                        replicate_url=clip_data["url"],
-                        asset_type="video",
-                        session_id=session_id,
-                        asset_id=asset_id,
-                        user_id=user_id
-                    )
-                    # Use S3 URL instead of temporary Replicate URL
-                    storage_url = s3_result["url"]
-                    logger.info(f"[{session_id}] Clip {i+1} uploaded to S3: {storage_url}")
-                except Exception as e:
-                    # Fall back to Replicate URL if S3 upload fails
-                    logger.warning(f"[{session_id}] S3 upload failed for clip {i+1}, using Replicate URL: {e}")
-                    storage_url = clip_data["url"]
+                # Clips already have S3 URLs from video_generator
+                storage_url = clip_data["url"]
+                logger.info(f"[{session_id}] Clip {i+1} already in S3: {storage_url}")
 
                 asset = Asset(
                     session_id=session_id,
                     type="video",
-                    url=storage_url,  # S3 URL or fallback Replicate URL
+                    url=storage_url,  # S3 URL from video_generator
                     approved=False,
                     asset_metadata={
                         "source_image_id": clip_data["source_image_id"],
@@ -528,7 +513,7 @@ class VideoGenerationOrchestrator:
                         "motion_intensity": clip_data["motion_intensity"],
                         "cost": clip_data["cost"],
                         "generation_time": clip_data["generation_time"],
-                        "asset_id": asset_id
+                        "asset_id": clip_data.get("id", f"clip_{uuid.uuid4().hex[:12]}")
                     }
                 )
                 db.add(asset)
@@ -1383,7 +1368,8 @@ class VideoGenerationOrchestrator:
                                 "approved_images": [{"url": image_url}],
                                 "video_prompt": prompt,
                                 "clip_duration": CLIP_DURATION,
-                                "model": "gen-4-turbo"
+                                "model": "gen-4-turbo",
+                                "user_id": user_id  # Pass user_id for S3 upload in video_generator
                             }
                         )
 
@@ -2626,40 +2612,41 @@ class VideoGenerationOrchestrator:
         else:
             logger.info(f"[{session_id}] No diagram found - will use generated images for video")
         
-        # Generate video clips for each segment
+        # Generate video clips for each segment - PARALLEL PROCESSING
         video_clips = []
         total_video_cost = 0.0
         total_segments_for_video = len(successful_segments)
-        current_video_idx = 0
 
         if not self.video_generator:
             raise ValueError("Video generator not initialized - check REPLICATE_API_KEY")
 
-        # Process each segment
-        for segment_result in successful_segments:
-            current_video_idx += 1
+        # Define async function for generating a single segment's video clip
+        async def generate_segment_video_clip(segment_result, segment_index):
+            """Generate video clip for a single segment with progress tracking."""
+            import time
+
             segment_num = segment_result.get("segment_number")
             part = segment_to_part.get(segment_num)
-            
+
             if not part:
                 logger.warning(f"[{session_id}] Unknown segment number {segment_num}, skipping")
-                continue
-            
+                return None
+
             # Get audio for this part
             audio_file = audio_files_by_part.get(part)
             if not audio_file:
                 logger.warning(f"[{session_id}] No audio file for {part}, skipping video generation")
-                continue
-            
+                return None
+
             # Validate audio file has URL
             audio_url = audio_file.get("url") or audio_file.get("presigned_url")
             if not audio_url:
                 logger.warning(f"[{session_id}] Audio file for {part} has no URL, skipping video generation")
-                continue
-            
+                return None
+
             # Get duration (ensure it's a float)
             audio_duration = float(audio_file.get("duration", 10.0))
-            
+
             # Get generated images
             generated_images = segment_result.get("generated_images", [])
 
@@ -2677,7 +2664,7 @@ class VideoGenerationOrchestrator:
                 # No diagram - use generated images
                 if not generated_images:
                     logger.warning(f"[{session_id}] No diagram or generated images for {part}, skipping video generation")
-                    continue
+                    return None
 
                 # Get presigned URLs for generated images
                 primary_images = []
@@ -2689,14 +2676,15 @@ class VideoGenerationOrchestrator:
 
                 video_prompt = f"{narration_text} Educational video with smooth transitions between images and dynamic camera movement."
 
-            logger.info(f"[{session_id}] Generating video clip for {part} (segment {segment_num}) using {'diagram' if diagram_url else f'{len(primary_images)} generated images'}")
+            logger.info(f"[{session_id}] Generating video clip {segment_index + 1}/{total_segments_for_video} for {part} (segment {segment_num}) using {'diagram' if diagram_url else f'{len(primary_images)} generated images'}")
 
-            # Send WebSocket update before generating each video clip
+            # Send WebSocket update before generating
+            start_time = time.time()
             await self.websocket_manager.broadcast_status(
                 session_id,
                 status="generating_video_clip",
-                progress=85 + (current_video_idx * 3),
-                details=f"Generating video clip {current_video_idx} of {total_segments_for_video}: {part.capitalize()}"
+                progress=85 + (segment_index * 3),
+                details=f"[{segment_index + 1}/{total_segments_for_video}] Starting video generation for {part.capitalize()}... (estimated 60-120s)"
             )
 
             # Generate video clip
@@ -2706,30 +2694,52 @@ class VideoGenerationOrchestrator:
                     "approved_images": primary_images,
                     "video_prompt": video_prompt,
                     "clip_duration": audio_duration,  # Match audio duration
-                    "model": "gen-4-turbo"
+                    "model": "gen-4-turbo",
+                    "user_id": user_id  # Pass user_id for S3 upload in video_generator
                 }
             )
-            
+
             try:
                 video_clip_result = await self.video_generator.process(video_input)
-                
+                generation_time = time.time() - start_time
+
                 if video_clip_result.success and video_clip_result.data.get("clips"):
                     clip_data = video_clip_result.data["clips"][0]
-                    total_video_cost += video_clip_result.cost
-                    
-                    video_clips.append({
+
+                    clip_info = {
                         "part": part,
                         "video_url": clip_data["url"],
                         "audio_url": audio_url,
                         "duration": audio_duration,
                         "narration_duration": audio_duration,
                         "gap_after_narration": 0.0,
-                        "script_text": narration_text
-                    })
-                    
-                    logger.info(f"[{session_id}] ✓ Generated video clip for {part}")
+                        "script_text": narration_text,
+                        "cost": video_clip_result.cost
+                    }
+
+                    # Send success notification
+                    await self.websocket_manager.broadcast_status(
+                        session_id,
+                        status="video_clip_completed",
+                        progress=85 + ((segment_index + 1) * 3),
+                        details=f"✓ [{segment_index + 1}/{total_segments_for_video}] Video clip for {part.capitalize()} generated successfully in {generation_time:.1f}s"
+                    )
+
+                    logger.info(f"[{session_id}] ✓ Generated video clip for {part} in {generation_time:.1f}s")
+                    return clip_info
                 else:
-                    logger.error(f"[{session_id}] Video clip generation failed for {part}: {video_clip_result.error}")
+                    # Handle empty or missing error messages
+                    error_msg = video_clip_result.error if video_clip_result.error else "Unknown video generation error (no details provided)"
+                    logger.error(f"[{session_id}] Video clip generation failed for {part}: {error_msg}")
+
+                    # Send WebSocket notification about video generation failure
+                    await self.websocket_manager.broadcast_status(
+                        session_id,
+                        status="warning",
+                        progress=85 + ((segment_index + 1) * 3),
+                        details=f"⚠ [{segment_index + 1}/{total_segments_for_video}] Video generation failed for {part}, using static image fallback: {error_msg}"
+                    )
+
                     # Fallback: use static image (diagram or first generated image)
                     fallback_image_key = diagram_s3_key if diagram_url else (generated_images[0].get("s3_key") if generated_images else None)
                     if fallback_image_key:
@@ -2737,7 +2747,7 @@ class VideoGenerationOrchestrator:
                             fallback_image_key,
                             expires_in=3600
                         )
-                        video_clips.append({
+                        return {
                             "part": part,
                             "video_url": None,  # Will be created from static image
                             "image_url": image_url,
@@ -2745,13 +2755,34 @@ class VideoGenerationOrchestrator:
                             "duration": audio_duration,
                             "narration_duration": audio_duration,
                             "gap_after_narration": 0.0,
-                            "script_text": narration_text
-                        })
+                            "script_text": narration_text,
+                            "cost": 0.0
+                        }
                     else:
                         logger.error(f"[{session_id}] No fallback image available for {part}")
+                        await self.websocket_manager.broadcast_status(
+                            session_id,
+                            status="error",
+                            progress=85 + ((segment_index + 1) * 3),
+                            details=f"❌ [{segment_index + 1}/{total_segments_for_video}] Video generation failed for {part} and no fallback image available"
+                        )
+                        return None
 
             except Exception as e:
-                logger.error(f"[{session_id}] Exception generating video clip for {part}: {e}")
+                generation_time = time.time() - start_time
+                # Handle empty exception messages with detailed fallback
+                error_details = str(e) if str(e) else f"{type(e).__name__} occurred (no error message provided)"
+                logger.error(f"[{session_id}] Exception generating video clip for {part}: {error_details}")
+                logger.exception(f"[{session_id}] Full exception details:")  # Log stack trace
+
+                # Send WebSocket notification about exception
+                await self.websocket_manager.broadcast_status(
+                    session_id,
+                    status="warning",
+                    progress=85 + ((segment_index + 1) * 3),
+                    details=f"⚠ [{segment_index + 1}/{total_segments_for_video}] Video generation exception for {part}, using static image: {error_details}"
+                )
+
                 # Fallback: use static image (diagram or first generated image)
                 fallback_image_key = diagram_s3_key if diagram_url else (generated_images[0].get("s3_key") if generated_images else None)
                 if fallback_image_key:
@@ -2759,7 +2790,7 @@ class VideoGenerationOrchestrator:
                         fallback_image_key,
                         expires_in=3600
                     )
-                    video_clips.append({
+                    return {
                         "part": part,
                         "video_url": None,
                         "image_url": image_url,
@@ -2767,10 +2798,41 @@ class VideoGenerationOrchestrator:
                         "duration": audio_duration,
                         "narration_duration": audio_duration,
                         "gap_after_narration": 0.0,
-                        "script_text": narration_text
-                    })
+                        "script_text": narration_text,
+                        "cost": 0.0
+                    }
                 else:
                     logger.error(f"[{session_id}] No fallback image available for {part}")
+                    return None
+
+        # Send initial notification about parallel video generation
+        await self.websocket_manager.broadcast_status(
+            session_id,
+            status="generating_videos_parallel",
+            progress=85,
+            details=f"Generating {total_segments_for_video} video clips in parallel... (estimated {total_segments_for_video * 30}-{total_segments_for_video * 40}s total)"
+        )
+
+        # Generate all video clips in parallel using asyncio.gather
+        logger.info(f"[{session_id}] Starting parallel video generation for {total_segments_for_video} segments")
+        tasks = []
+        for i, segment_result in enumerate(successful_segments):
+            task = generate_segment_video_clip(segment_result, i)
+            tasks.append(task)
+
+        # Execute all video generation tasks in parallel
+        video_clip_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Process results and collect successful clips
+        for i, result in enumerate(video_clip_results):
+            if isinstance(result, Exception):
+                error_msg = str(result) if str(result) else f"{type(result).__name__} occurred"
+                logger.error(f"[{session_id}] Video clip task {i+1} raised exception: {error_msg}")
+                continue
+
+            if result is not None:
+                video_clips.append(result)
+                total_video_cost += result.get("cost", 0.0)
         
         if not video_clips:
             raise ValueError("No video clips generated")

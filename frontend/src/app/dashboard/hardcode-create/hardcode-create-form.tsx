@@ -73,6 +73,7 @@ export function HardcodeCreateForm({
   const [statusItems, setStatusItems] = useState<any[]>([]);
   const [generatedImages, setGeneratedImages] = useState<any[]>([]);
   const [generatedAudio, setGeneratedAudio] = useState<any[]>([]);
+  const [finalVideoUrl, setFinalVideoUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -191,6 +192,10 @@ export function HardcodeCreateForm({
         status === "completed"
       ) {
         console.log("[HardcodeCreate] Video composition complete!");
+        // Check if there's a video_url in the message
+        if (lastMessage.video_url) {
+          setFinalVideoUrl(lastMessage.video_url);
+        }
         fetchResults(lastMessage.session_id);
       }
 
@@ -908,6 +913,31 @@ export function HardcodeCreateForm({
                       </div>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Final Video */}
+              {finalVideoUrl && (
+                <div className="space-y-2 border-t pt-3">
+                  <p className="text-sm font-medium text-foreground">Final Video</p>
+                  <div className="rounded-lg overflow-hidden border bg-muted/50">
+                    <video
+                      controls
+                      className="w-full h-auto"
+                      src={finalVideoUrl}
+                      preload="metadata"
+                    >
+                      Your browser does not support the video tag.
+                    </video>
+                  </div>
+                  <a
+                    href={finalVideoUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-blue-600 hover:text-blue-800 underline inline-block"
+                  >
+                    Open video in new tab
+                  </a>
                 </div>
               )}
 

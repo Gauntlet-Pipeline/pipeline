@@ -17,6 +17,7 @@ from typing import List, Dict, Any, Optional
 import replicate
 
 from app.agents.base import AgentInput, AgentOutput
+from app.services.storage import StorageService
 
 logger = logging.getLogger(__name__)
 
@@ -32,15 +33,17 @@ class VideoGeneratorAgent:
     - Cost tracking per clip
     """
 
-    def __init__(self, replicate_api_key: str):
+    def __init__(self, replicate_api_key: str, storage_service: Optional[StorageService] = None):
         """
         Initialize the Video Generator Agent.
 
         Args:
             replicate_api_key: Replicate API key for video generation
+            storage_service: Optional storage service for S3 uploads (if not provided, will create one)
         """
         self.api_key = replicate_api_key
         self.client = replicate.Client(api_token=replicate_api_key)
+        self.storage_service = storage_service or StorageService()
 
         # Model configurations (Replicate model IDs)
         self.models = {
@@ -66,7 +69,7 @@ class VideoGeneratorAgent:
 
     async def process(self, input: AgentInput) -> AgentOutput:
         """
-        Generate video clips from approved images.
+        Generate video clips from approved images and upload to S3.
 
         Args:
             input: AgentInput containing:
@@ -74,10 +77,11 @@ class VideoGeneratorAgent:
                 - data["video_prompt"]: User's scene description
                 - data["clip_duration"]: Duration per clip (default 3.0s)
                 - data["model"]: Model to use (default "stable-video-diffusion")
+                - data["user_id"]: User ID for S3 storage (required for S3 upload)
 
         Returns:
             AgentOutput containing:
-                - data["clips"]: List of generated clip objects with URLs
+                - data["clips"]: List of generated clip objects with S3 URLs
                 - data["total_cost"]: Total generation cost
                 - cost: Total cost
                 - duration: Total time taken
@@ -90,6 +94,7 @@ class VideoGeneratorAgent:
             video_prompt = input.data.get("video_prompt", "product showcase")
             clip_duration = input.data.get("clip_duration", 3.0)
             model_name = input.data.get("model", "stable-video-diffusion")
+            user_id = input.data.get("user_id")  # Optional - if not provided, will use Replicate URLs only
 
             if not approved_images:
                 raise ValueError("No approved images provided")
@@ -127,7 +132,8 @@ class VideoGeneratorAgent:
                     scene_prompt=scene["scene_prompt"],
                     duration=clip_duration,
                     source_image_id=image_data.get("id", f"img_{i}"),
-                    index=i
+                    index=i,
+                    user_id=user_id  # Pass user_id for S3 upload
                 )
                 tasks.append(task)
 
@@ -141,7 +147,9 @@ class VideoGeneratorAgent:
 
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
-                    error_msg = f"Clip {i} generation failed: {result}"
+                    # Handle empty exception messages
+                    error_details = str(result) if str(result) else f"{type(result).__name__} occurred (no error message provided)"
+                    error_msg = f"Clip {i} generation failed: {error_details}"
                     logger.error(f"[{input.session_id}] {error_msg}")
                     errors.append(error_msg)
                     continue
@@ -180,14 +188,16 @@ class VideoGeneratorAgent:
 
         except Exception as e:
             duration = time.time() - start_time
-            logger.error(f"[{input.session_id}] Video generation failed: {e}")
+            # Handle empty exception messages
+            error_msg = str(e) if str(e) else f"{type(e).__name__} occurred (no error message provided)"
+            logger.error(f"[{input.session_id}] Video generation failed: {error_msg}")
 
             return AgentOutput(
                 success=False,
                 data={},
                 cost=0.0,
                 duration=duration,
-                error=str(e)
+                error=error_msg
             )
 
     async def _plan_video_scenes(
@@ -321,6 +331,44 @@ Create scene-specific prompts for each image view."""
 
         return default_scenes
 
+    async def _upload_clip_to_s3(
+        self,
+        replicate_url: str,
+        session_id: str,
+        user_id: int,
+        clip_id: str
+    ) -> str:
+        """
+        Upload a video clip from Replicate to S3.
+
+        Args:
+            replicate_url: URL of video from Replicate
+            session_id: Session ID for organizing files
+            user_id: User ID for organizing files
+            clip_id: Unique clip identifier
+
+        Returns:
+            S3 URL of uploaded clip
+
+        Raises:
+            Exception: If upload fails
+        """
+        try:
+            logger.debug(f"[{session_id}] Uploading clip {clip_id} to S3")
+            s3_result = await self.storage_service.download_and_upload(
+                replicate_url=replicate_url,
+                asset_type="clip",
+                session_id=session_id,
+                asset_id=clip_id,
+                user_id=user_id
+            )
+            s3_url = s3_result["url"]
+            logger.info(f"[{session_id}] Clip {clip_id} uploaded to S3: {s3_url}")
+            return s3_url
+        except Exception as e:
+            logger.warning(f"[{session_id}] S3 upload failed for clip {clip_id}: {e}, using Replicate URL")
+            return replicate_url  # Fallback to Replicate URL
+
     async def _generate_single_clip(
         self,
         session_id: str,
@@ -329,10 +377,11 @@ Create scene-specific prompts for each image view."""
         scene_prompt: str,
         duration: float,
         source_image_id: str,
-        index: int
+        index: int,
+        user_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        Generate a single video clip via Replicate API (Veo 3.1 or SVD).
+        Generate a single video clip via Replicate API (Veo 3.1 or SVD) and upload to S3.
 
         Args:
             session_id: Session ID for logging
@@ -342,9 +391,10 @@ Create scene-specific prompts for each image view."""
             duration: Clip duration in seconds
             source_image_id: ID of source image
             index: Clip index for logging
+            user_id: User ID for S3 storage (if None, returns Replicate URL only)
 
         Returns:
-            Clip result dict with URL, metadata, cost, duration
+            Clip result dict with S3 URL (or Replicate URL if user_id not provided), metadata, cost, duration
 
         Raises:
             Exception: If video generation fails
@@ -396,8 +446,18 @@ Create scene-specific prompts for each image view."""
                     f"[{session_id}] Veo 3.1 clip {index + 1} generated in {generation_time:.2f}s"
                 )
 
+                # Upload to S3 if user_id provided
+                clip_id = f"clip_{uuid.uuid4().hex[:8]}"
+                if user_id is not None:
+                    video_url = await self._upload_clip_to_s3(
+                        replicate_url=str(video_url),
+                        session_id=session_id,
+                        user_id=user_id,
+                        clip_id=clip_id
+                    )
+
                 return {
-                    "id": f"clip_{uuid.uuid4().hex[:8]}",
+                    "id": clip_id,
                     "url": str(video_url),
                     "source_image_id": source_image_id,
                     "duration": duration_seconds,
@@ -448,8 +508,18 @@ Create scene-specific prompts for each image view."""
                     f"[{session_id}] Minimax Video-01 clip {index + 1} generated in {generation_time:.2f}s"
                 )
 
+                # Upload to S3 if user_id provided
+                clip_id = f"clip_{uuid.uuid4().hex[:8]}"
+                if user_id is not None:
+                    video_url = await self._upload_clip_to_s3(
+                        replicate_url=str(video_url),
+                        session_id=session_id,
+                        user_id=user_id,
+                        clip_id=clip_id
+                    )
+
                 return {
-                    "id": f"clip_{uuid.uuid4().hex[:8]}",
+                    "id": clip_id,
                     "url": str(video_url),
                     "source_image_id": source_image_id,
                     "duration": duration_seconds,
@@ -511,8 +581,18 @@ Create scene-specific prompts for each image view."""
                     f"[{session_id}] SVD clip {index + 1} generated in {generation_time:.2f}s"
                 )
 
+                # Upload to S3 if user_id provided
+                clip_id = f"clip_{uuid.uuid4().hex[:8]}"
+                if user_id is not None:
+                    video_url = await self._upload_clip_to_s3(
+                        replicate_url=str(video_url),
+                        session_id=session_id,
+                        user_id=user_id,
+                        clip_id=clip_id
+                    )
+
                 return {
-                    "id": f"clip_{uuid.uuid4().hex[:8]}",
+                    "id": clip_id,
                     "url": str(video_url),
                     "source_image_id": source_image_id,
                     "duration": actual_duration,
@@ -529,8 +609,13 @@ Create scene-specific prompts for each image view."""
 
         except Exception as e:
             generation_time = time.time() - start
+            # Handle empty exception messages before logging
+            error_msg = str(e) if str(e) else f"{type(e).__name__} occurred (no error message provided)"
             logger.error(
                 f"[{session_id}] Clip {index + 1} generation failed "
-                f"after {generation_time:.2f}s: {e}"
+                f"after {generation_time:.2f}s: {error_msg}"
             )
+            # Re-raise with better error message if original was empty
+            if not str(e):
+                raise type(e)(f"{type(e).__name__} during video generation") from e
             raise

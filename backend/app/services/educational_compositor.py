@@ -56,6 +56,66 @@ class EducationalCompositor:
             logger.error(f"FFmpeg not found or not working: {e}")
             raise RuntimeError("FFmpeg is required but not installed")
 
+        # Detect best available video encoder for performance
+        self.video_encoder = self._detect_hardware_encoder()
+        logger.info(f"Using video encoder: {self.video_encoder['name']} ({self.video_encoder['type']})")
+
+    def _detect_hardware_encoder(self) -> Dict[str, Any]:
+        """
+        Detect the best available hardware encoder for H.264 video encoding.
+
+        Priority order:
+        1. h264_nvenc (NVIDIA GPU - EC2 GPU instances)
+        2. h264_videotoolbox (Apple Silicon/Intel Mac - development)
+        3. libx264 ultrafast (CPU fallback - EC2 CPU instances)
+
+        Returns:
+            Dict with encoder name, type, and encoding parameters
+        """
+        try:
+            # Get list of available encoders
+            result = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-encoders"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            encoders_output = result.stdout
+
+            # Check for NVIDIA NVENC (best for EC2 GPU instances)
+            if "h264_nvenc" in encoders_output:
+                logger.info("Detected NVIDIA NVENC hardware encoder")
+                return {
+                    "name": "h264_nvenc",
+                    "type": "NVIDIA GPU Hardware",
+                    "params": ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "5M"]
+                }
+
+            # Check for VideoToolbox (macOS)
+            if "h264_videotoolbox" in encoders_output:
+                logger.info("Detected Apple VideoToolbox hardware encoder")
+                return {
+                    "name": "h264_videotoolbox",
+                    "type": "Apple Hardware",
+                    "params": ["-c:v", "h264_videotoolbox", "-b:v", "5M"]
+                }
+
+            # Fallback to libx264 with ultrafast preset (CPU)
+            logger.info("No hardware encoder found, using libx264 ultrafast")
+            return {
+                "name": "libx264",
+                "type": "CPU Software (ultrafast)",
+                "params": ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]
+            }
+
+        except Exception as e:
+            logger.warning(f"Error detecting hardware encoder: {e}, falling back to libx264")
+            return {
+                "name": "libx264",
+                "type": "CPU Software (ultrafast)",
+                "params": ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]
+            }
+
     async def compose_educational_video(
         self,
         timeline: List[Dict[str, Any]],
@@ -219,6 +279,7 @@ class EducationalCompositor:
         Returns:
             List of processed video clip paths
         """
+        import time
         video_clips = []
 
         for i, segment in enumerate(segment_files):
@@ -228,48 +289,54 @@ class EducationalCompositor:
 
             if segment["video_path"]:
                 # Normalize existing video to 1080p@30fps and trim to desired duration
-                logger.info(f"[{session_id}] Normalizing generated video for {segment['part']} (target duration: {segment['duration']}s)")
+                logger.info(f"[{session_id}] Normalizing generated video for {segment['part']} (target duration: {segment['duration']}s) using {self.video_encoder['name']}")
                 cmd = [
                     "ffmpeg", "-y",
                     "-i", segment["video_path"],
                     "-t", str(segment["duration"]),  # Trim to desired duration
                     "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30",
-                    "-c:v", "libx264",
-                    "-preset", "medium",
-                    "-crf", "23",
+                ]
+                # Add encoder-specific parameters
+                cmd.extend(self.video_encoder["params"])
+                cmd.extend([
                     "-pix_fmt", "yuv420p",
                     "-an",  # Remove audio from video (we'll add narration separately)
                     "-movflags", "+faststart",
                     output_path
-                ]
+                ])
             else:
                 # Create video from static image with duration
-                logger.info(f"[{session_id}] Creating video from image for {segment['part']}")
+                logger.info(f"[{session_id}] Creating video from image for {segment['part']} using {self.video_encoder['name']}")
                 cmd = [
                     "ffmpeg", "-y",
                     "-loop", "1",  # Loop the image
                     "-i", segment["image_path"],
                     "-t", str(segment["duration"]),  # Duration
                     "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30",
-                    "-c:v", "libx264",
-                    "-preset", "medium",
-                    "-crf", "23",
+                ]
+                # Add encoder-specific parameters
+                cmd.extend(self.video_encoder["params"])
+                cmd.extend([
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
                     output_path
-                ]
+                ])
 
+            # Execute FFmpeg with timing
+            start_time = time.time()
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=120
             )
+            encode_time = time.time() - start_time
 
             if result.returncode != 0:
                 logger.error(f"[{session_id}] FFmpeg processing failed: {result.stderr}")
                 raise Exception(f"Failed to process video clip for segment {i}")
 
+            logger.info(f"[{session_id}] ✓ Clip {i + 1} encoded in {encode_time:.1f}s ({segment['duration']:.1f}s video, {encode_time/segment['duration']:.1f}x realtime)")
             video_clips.append(output_path)
 
         logger.info(f"[{session_id}] Processed {len(video_clips)} video clips")
