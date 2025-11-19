@@ -228,10 +228,17 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             try:
                 data = await websocket.receive_text()
                 # Client can send messages if needed, but we primarily use this for receiving
+            except WebSocketDisconnect:
+                break
             except Exception:
-                # Handle ping/pong or other WebSocket frames
-                await websocket.receive()
+                # Handle ping/pong or other WebSocket frames, but check if still connected
+                try:
+                    await websocket.receive()
+                except (WebSocketDisconnect, RuntimeError):
+                    break
     except WebSocketDisconnect:
+        pass
+    finally:
         await websocket_manager.disconnect(websocket, session_id)
 
 
@@ -278,15 +285,38 @@ async def start_processing(
     if not request.scriptID or not request.scriptID.strip():
         raise HTTPException(status_code=400, detail="scriptID is required and cannot be empty")
     
-    # Start Agent2 in background
-    background_tasks.add_task(
-        agent_2_process,
-        user_id=request.userID,
-        session_id=request.sessionID,
-        template_id=request.templateID,
-        chosen_diagram_id=request.chosenDiagramID,
-        script_id=request.scriptID
-    )
+    # Start Agent2 in background with error handling
+    async def run_agent_2_with_error_handling():
+        """Wrapper to catch and log errors in background task."""
+        import logging
+        logger = logging.getLogger(__name__)
+        try:
+            await agent_2_process(
+                user_id=request.userID,
+                session_id=request.sessionID,
+                template_id=request.templateID,
+                chosen_diagram_id=request.chosenDiagramID,
+                script_id=request.scriptID
+            )
+        except Exception as e:
+            # Log error and send error status via WebSocket
+            logger.exception(f"Error in agent_2_process for session {request.sessionID}: {e}")
+            
+            # Try to send error status via WebSocket
+            try:
+                await websocket_manager.send_progress(request.sessionID, {
+                    "agentnumber": "Agent2",
+                    "userID": request.userID,
+                    "sessionID": request.sessionID,
+                    "status": "error",
+                    "error": str(e),
+                    "reason": f"Agent2 failed: {type(e).__name__}"
+                })
+            except Exception as ws_error:
+                logger.error(f"Failed to send error status via WebSocket: {ws_error}")
+    
+    # Use asyncio.create_task for async background tasks (BackgroundTasks doesn't handle async well)
+    asyncio.create_task(run_agent_2_with_error_handling())
     
     # Return immediately with success message
     return StartProcessingResponse(
