@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Processing Test UI</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .container {
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 600px;
+            width: 100%;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+            text-align: center;
+            font-size: 28px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: 500;
+            font-size: 14px;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .submit-btn {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin-top: 10px;
+        }
+
+        .submit-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .submit-btn:active {
+            transform: translateY(0);
+        }
+
+        .submit-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .status-section {
+            margin-top: 40px;
+            padding-top: 30px;
+            border-top: 2px solid #e0e0e0;
+        }
+
+        .status-section h2 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 20px;
+        }
+
+        .agent-status {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+
+        .agent-label {
+            font-weight: 600;
+            color: #333;
+            margin-right: 15px;
+            min-width: 80px;
+        }
+
+        .status-light {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: #000;
+            margin-right: 15px;
+            transition: background-color 0.3s;
+        }
+
+        .status-light.starting {
+            background: #ff0000;
+            animation: blink 1s infinite;
+        }
+
+        .status-light.processing {
+            background: #ffd700;
+            animation: none;
+        }
+
+        .status-light.finished {
+            background: #00ff00;
+            animation: none;
+        }
+
+        .status-light.error {
+            background: #ff0000;
+            animation: none;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        .status-text {
+            color: #666;
+            font-size: 14px;
+            flex: 1;
+        }
+
+        .error-message {
+            color: #ff0000;
+            font-size: 12px;
+            margin-top: 5px;
+            display: none;
+        }
+
+        .error-message.show {
+            display: block;
+        }
+
+        .connection-status {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            text-align: center;
+        }
+
+        .connection-status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .connection-status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .connection-status.connecting {
+            background: #fff3cd;
+            color: #856404;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Agent Processing Test</h1>
+        
+        <form id="processingForm">
+            <div class="form-group">
+                <label for="userID">User ID:</label>
+                <input type="text" id="userID" name="userID" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="sessionID">Session ID:</label>
+                <input type="text" id="sessionID" name="sessionID" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="templateID">Template ID:</label>
+                <input type="text" id="templateID" name="templateID" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="chosenDiagramID">Chosen Diagram ID:</label>
+                <input type="text" id="chosenDiagramID" name="chosenDiagramID" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="scriptID">Script ID:</label>
+                <input type="text" id="scriptID" name="scriptID" required>
+            </div>
+            
+            <button type="submit" class="submit-btn" id="submitBtn">Start Processing</button>
+        </form>
+
+        <div class="status-section">
+            <h2>Agent Status</h2>
+            
+            <div class="agent-status">
+                <span class="agent-label">Agent2</span>
+                <div class="status-light" id="light-agent2"></div>
+                <div class="status-text" id="status-agent2">Not triggered</div>
+                <div class="error-message" id="error-agent2"></div>
+            </div>
+            
+            <div class="agent-status">
+                <span class="agent-label">Agent4</span>
+                <div class="status-light" id="light-agent4"></div>
+                <div class="status-text" id="status-agent4">Not triggered</div>
+                <div class="error-message" id="error-agent4"></div>
+            </div>
+            
+            <div class="agent-status">
+                <span class="agent-label">Agent5</span>
+                <div class="status-light" id="light-agent5"></div>
+                <div class="status-text" id="status-agent5">Not triggered</div>
+                <div class="error-message" id="error-agent5"></div>
+            </div>
+
+            <div class="connection-status disconnected" id="connectionStatus">
+                WebSocket: Disconnected
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let websocket = null;
+        let currentSessionId = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+        const reconnectDelay = 3000; // 3 seconds
+
+        // Get API base URL - use same origin since HTML is served from backend
+        const API_BASE_URL = window.location.origin;
+
+        // Agent status tracking
+        const agentStatuses = {
+            'Agent2': { light: null, text: null, error: null },
+            'Agent4': { light: null, text: null, error: null },
+            'Agent5': { light: null, text: null, error: null }
+        };
+
+        // Initialize agent status elements
+        ['Agent2', 'Agent4', 'Agent5'].forEach(agent => {
+            agentStatuses[agent] = {
+                light: document.getElementById(`light-${agent.toLowerCase()}`),
+                text: document.getElementById(`status-${agent.toLowerCase()}`),
+                error: document.getElementById(`error-${agent.toLowerCase()}`)
+            };
+        });
+
+        const connectionStatus = document.getElementById('connectionStatus');
+        const form = document.getElementById('processingForm');
+        const submitBtn = document.getElementById('submitBtn');
+
+        // Reset all agent status lights to black
+        function resetAgentStatuses() {
+            ['Agent2', 'Agent4', 'Agent5'].forEach(agent => {
+                const status = agentStatuses[agent];
+                status.light.className = 'status-light';
+                status.text.textContent = 'Not triggered';
+                status.error.textContent = '';
+                status.error.classList.remove('show');
+            });
+        }
+
+        // Update agent status based on WebSocket message
+        function updateAgentStatus(agentNumber, status, error, reason) {
+            const agent = agentStatuses[agentNumber];
+            if (!agent) return;
+
+            agent.light.className = 'status-light';
+            agent.text.textContent = 'Not triggered';
+
+            if (status === 'starting') {
+                agent.light.classList.add('starting');
+                agent.text.textContent = 'Starting...';
+            } else if (status === 'processing') {
+                agent.light.classList.add('processing');
+                agent.text.textContent = 'Processing...';
+            } else if (status === 'finished') {
+                agent.light.classList.add('finished');
+                agent.text.textContent = 'Finished';
+            } else if (status === 'error') {
+                agent.light.classList.add('error');
+                agent.text.textContent = 'Error';
+                if (error && reason) {
+                    agent.error.textContent = `${reason}: ${error}`;
+                    agent.error.classList.add('show');
+                }
+            }
+        }
+
+        // Connect to WebSocket
+        function connectWebSocket(sessionId) {
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                websocket.close();
+            }
+
+            const wsUrl = API_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://');
+            const wsPath = `${wsUrl}/ws/${sessionId}`;
+            
+            updateConnectionStatus('connecting', 'Connecting...');
+            
+            websocket = new WebSocket(wsPath);
+
+            websocket.onopen = () => {
+                console.log('WebSocket connected');
+                reconnectAttempts = 0;
+                updateConnectionStatus('connected', 'WebSocket: Connected');
+            };
+
+            websocket.onmessage = (event) => {
+                try {
+                    const message = JSON.parse(event.data);
+                    console.log('WebSocket message:', message);
+
+                    // Check if message matches our expected format
+                    if (message.agentnumber && message.userID && message.sessionID && message.status) {
+                        // Verify it matches current session
+                        if (message.sessionID === currentSessionId) {
+                            updateAgentStatus(
+                                message.agentnumber,
+                                message.status,
+                                message.error,
+                                message.reason
+                            );
+                        }
+                    }
+                } catch (e) {
+                    console.error('Error parsing WebSocket message:', e);
+                }
+            };
+
+            websocket.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                updateConnectionStatus('disconnected', 'WebSocket: Error');
+            };
+
+            websocket.onclose = () => {
+                console.log('WebSocket closed');
+                updateConnectionStatus('disconnected', 'WebSocket: Disconnected');
+                
+                // Attempt to reconnect if we have an active session
+                if (currentSessionId && reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    console.log(`Attempting to reconnect (${reconnectAttempts}/${maxReconnectAttempts})...`);
+                    setTimeout(() => {
+                        connectWebSocket(currentSessionId);
+                    }, reconnectDelay);
+                }
+            };
+        }
+
+        // Update connection status display
+        function updateConnectionStatus(status, text) {
+            connectionStatus.className = `connection-status ${status}`;
+            connectionStatus.textContent = text;
+        }
+
+        // Handle form submission
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const formData = {
+                userID: document.getElementById('userID').value.trim(),
+                sessionID: document.getElementById('sessionID').value.trim(),
+                templateID: document.getElementById('templateID').value.trim(),
+                chosenDiagramID: document.getElementById('chosenDiagramID').value.trim(),
+                scriptID: document.getElementById('scriptID').value.trim()
+            };
+
+            // Reset status lights
+            resetAgentStatuses();
+            
+            // Set current session ID
+            currentSessionId = formData.sessionID;
+            reconnectAttempts = 0;
+
+            // Disable submit button
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Starting...';
+
+            try {
+                // Connect to WebSocket first
+                connectWebSocket(formData.sessionID);
+
+                // Call API endpoint
+                const response = await fetch(`${API_BASE_URL}/api/startprocessing`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(formData)
+                });
+
+                const result = await response.json();
+
+                if (response.ok && result.success) {
+                    console.log('Processing started:', result);
+                } else {
+                    throw new Error(result.message || 'Failed to start processing');
+                }
+            } catch (error) {
+                console.error('Error starting processing:', error);
+                alert(`Error: ${error.message}`);
+                if (websocket) {
+                    websocket.close();
+                }
+                updateConnectionStatus('disconnected', 'WebSocket: Disconnected');
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Start Processing';
+            }
+        });
+    </script>
+</body>
+</html>
+

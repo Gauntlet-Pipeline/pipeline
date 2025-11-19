@@ -2,17 +2,24 @@
 Main FastAPI application for Gauntlet Pipeline Orchestrator.
 """
 import time
-from fastapi import FastAPI
+import asyncio
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
+from pathlib import Path
 from app.config import get_settings
 from app.services.storage import StorageService
+from app.services.websocket_manager import WebSocketManager
 
 settings = get_settings()
 
 # Initialize storage service for monitor
 storage_service = StorageService()
+
+# Initialize WebSocket manager for agent status updates
+websocket_manager = WebSocketManager()
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -151,6 +158,141 @@ async def process(request: ProcessRequest):
 async def root():
     """Health check endpoint."""
     return {"status": "healthy", "service": "Gauntlet Pipeline Orchestrator"}
+
+
+@app.get("/scaffoldtest", response_class=HTMLResponse)
+async def scaffoldtest_ui():
+    """
+    Serve the scaffold test UI HTML page.
+    
+    Access at: http://localhost:8000/scaffoldtest
+    """
+    # Get the backend directory (parent of app directory)
+    backend_dir = Path(__file__).parent.parent
+    html_file = backend_dir / "scaffoldtest_ui.html"
+    
+    if not html_file.exists():
+        raise HTTPException(status_code=404, detail="scaffoldtest_ui.html not found")
+    
+    return FileResponse(html_file)
+
+
+# =============================================================================
+# Agent Processing Functions (Scaffolding)
+# Import agents from agents folder
+# =============================================================================
+
+from app.agents.scaffold_agent_2 import agent_2_process as agent_2_process_impl
+
+
+async def agent_2_process(
+    user_id: str,
+    session_id: str,
+    template_id: str,
+    chosen_diagram_id: str,
+    script_id: str
+):
+    """
+    Agent2: First agent in the processing pipeline.
+    
+    Wrapper function that calls the agent implementation from agents folder.
+    """
+    await agent_2_process_impl(
+        websocket_manager=websocket_manager,
+        user_id=user_id,
+        session_id=session_id,
+        template_id=template_id,
+        chosen_diagram_id=chosen_diagram_id,
+        script_id=script_id
+    )
+
+
+# =============================================================================
+# WebSocket Endpoint for Agent Status Updates
+# =============================================================================
+
+@app.websocket("/ws/{session_id}")
+async def websocket_endpoint(websocket: WebSocket, session_id: str):
+    """
+    WebSocket endpoint for real-time agent status updates.
+    
+    Clients connect to this endpoint to receive status updates from agents.
+    Messages are filtered by session_id.
+    """
+    await websocket_manager.connect(websocket, session_id)
+    try:
+        while True:
+            # Keep connection alive - wait for any message (text or ping/pong)
+            # This keeps the connection open to receive agent status updates
+            try:
+                data = await websocket.receive_text()
+                # Client can send messages if needed, but we primarily use this for receiving
+            except Exception:
+                # Handle ping/pong or other WebSocket frames
+                await websocket.receive()
+    except WebSocketDisconnect:
+        await websocket_manager.disconnect(websocket, session_id)
+
+
+# =============================================================================
+# Start Processing API Endpoint
+# =============================================================================
+
+class StartProcessingRequest(BaseModel):
+    """Request model for starting the agent processing pipeline."""
+    userID: str
+    sessionID: str
+    templateID: str
+    chosenDiagramID: str
+    scriptID: str
+
+
+class StartProcessingResponse(BaseModel):
+    """Response model for start processing endpoint."""
+    success: bool
+    message: str
+    sessionID: str
+
+
+@app.post("/api/startprocessing", response_model=StartProcessingResponse)
+async def start_processing(
+    request: StartProcessingRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Start the agent processing pipeline.
+    
+    Accepts a JSON object with userID, sessionID, templateID, chosenDiagramID, and scriptID.
+    Returns immediately with success message and triggers Agent2 in the background.
+    """
+    # Input validation
+    if not request.userID or not request.userID.strip():
+        raise HTTPException(status_code=400, detail="userID is required and cannot be empty")
+    if not request.sessionID or not request.sessionID.strip():
+        raise HTTPException(status_code=400, detail="sessionID is required and cannot be empty")
+    if not request.templateID or not request.templateID.strip():
+        raise HTTPException(status_code=400, detail="templateID is required and cannot be empty")
+    if not request.chosenDiagramID or not request.chosenDiagramID.strip():
+        raise HTTPException(status_code=400, detail="chosenDiagramID is required and cannot be empty")
+    if not request.scriptID or not request.scriptID.strip():
+        raise HTTPException(status_code=400, detail="scriptID is required and cannot be empty")
+    
+    # Start Agent2 in background
+    background_tasks.add_task(
+        agent_2_process,
+        user_id=request.userID,
+        session_id=request.sessionID,
+        template_id=request.templateID,
+        chosen_diagram_id=request.chosenDiagramID,
+        script_id=request.scriptID
+    )
+    
+    # Return immediately with success message
+    return StartProcessingResponse(
+        success=True,
+        message="Processing started successfully",
+        sessionID=request.sessionID
+    )
 
 
 # =============================================================================
