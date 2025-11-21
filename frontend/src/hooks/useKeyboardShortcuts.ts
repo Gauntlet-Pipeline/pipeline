@@ -54,7 +54,7 @@ export function useKeyboardShortcuts() {
       if (modifier && e.code === 'KeyA') { e.preventDefault(); selectAll(); return; }
 
       // C - Split at playhead
-      if (e.code === 'KeyC' && !modifier && selectedIds.length === 1) { e.preventDefault(); splitMedia(selectedIds[0], currentTime); return; }
+      if (e.code === 'KeyC' && !modifier && selectedIds.length === 1 && selectedIds[0]) { e.preventDefault(); splitMedia(selectedIds[0], currentTime); return; }
 
       // J/K/L - Playback control
       if (e.code === 'KeyJ') { e.preventDefault(); setCurrentTime(Math.max(0, currentTime - 5)); return; }
