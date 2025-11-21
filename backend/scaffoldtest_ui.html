@@ -908,12 +908,19 @@
                     agent.error.textContent = errorMsg;
                     agent.error.classList.add('show');
                     
-                    // Show restart button for Agent5 Remotion errors
+                    // Show restart button for Agent5 Remotion/rendering errors
                     if (agentNumber === 'Agent5' && restartBtn) {
-                        // Show button if error mentions Remotion or if we have progress data indicating clips were generated
-                        const showRestart = error.toLowerCase().includes('remotion') || 
-                                          reason.toLowerCase().includes('remotion') ||
-                                          (window.agent5ClipsGenerated && window.agent5ClipsGenerated > 0);
+                        // Show button if error is related to Remotion/rendering stage (bun, remotion keywords)
+                        // or if we have progress data indicating clips were generated (cost > 0)
+                        const errorText = error.toLowerCase();
+                        const reasonText = reason.toLowerCase();
+                        const showRestart = errorText.includes('remotion') || 
+                                          reasonText.includes('remotion') ||
+                                          errorText.includes('bun') ||
+                                          reasonText.includes('bun') ||
+                                          errorText.includes('rendering') ||
+                                          (window.agent5ClipsGenerated && window.agent5ClipsGenerated > 0) ||
+                                          (cost !== undefined && cost !== null && cost > 0);
                         
                         if (showRestart) {
                             restartBtn.style.display = 'block';
@@ -1778,7 +1785,7 @@ ${JSON.stringify(result, null, 2)}`;
                 agent5Error.classList.remove('show');
                 
                 // Call restart endpoint
-                const response = await fetch(`${apiBaseUrl}/api/restart-agent5-remotion`, {
+                const response = await fetch(`${API_BASE_URL}/api/restart-agent5-remotion`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
