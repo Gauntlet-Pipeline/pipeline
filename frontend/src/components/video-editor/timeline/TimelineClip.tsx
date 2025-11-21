@@ -2,9 +2,11 @@
 
 import { useRef, useState, useCallback, useMemo } from 'react';
 import { Box, Typography } from '@mui/material';
+import { Videocam, MusicNote, TextFields } from '@mui/icons-material';
 import Moveable from 'react-moveable';
 import { throttle } from 'lodash';
 import { useEditorStore, type MediaFile, type TextElement } from '@/stores/editorStore';
+import { colors } from '../theme';
 
 interface TimelineClipProps {
   item: MediaFile | TextElement;
@@ -81,19 +83,21 @@ export function TimelineClip({ item, trackType, zoom, trackHeight }: TimelineCli
     [item, zoom, isMedia, updateMedia, updateText]
   );
 
-  const getClipColor = () => {
-    switch (trackType) {
-      case 'video': return isSelected ? '#2196f3' : '#1976d2';
-      case 'audio': return isSelected ? '#4caf50' : '#388e3c';
-      case 'text': return isSelected ? '#ff9800' : '#f57c00';
-      default: return '#666';
-    }
-  };
+  const trackColors = colors.tracks[trackType];
 
   const getClipLabel = () => {
     if (isMedia) return (item as MediaFile).fileName;
     const textItem = item as TextElement;
     return textItem.text.substring(0, 20) + (textItem.text.length > 20 ? '...' : '');
+  };
+
+  const ClipIcon = () => {
+    const sx = { fontSize: 12, opacity: 0.8 };
+    switch (trackType) {
+      case 'video': return <Videocam sx={sx} />;
+      case 'audio': return <MusicNote sx={sx} />;
+      case 'text': return <TextFields sx={sx} />;
+    }
   };
 
   return (
@@ -109,21 +113,65 @@ export function TimelineClip({ item, trackType, zoom, trackHeight }: TimelineCli
           top: 4,
           width,
           height: trackHeight - 8,
-          bgcolor: getClipColor(),
-          borderRadius: 1,
+          background: isSelected
+            ? `linear-gradient(135deg, ${trackColors.main} 0%, ${trackColors.main}dd 100%)`
+            : `linear-gradient(135deg, ${trackColors.main}cc 0%, ${trackColors.main}99 100%)`,
+          borderRadius: 1.5,
           cursor: 'pointer',
           display: 'flex',
           alignItems: 'center',
+          gap: 0.5,
           px: 1,
           overflow: 'hidden',
-          border: isSelected ? '2px solid #fff' : 'none',
-          boxShadow: isSelected ? '0 0 8px rgba(33, 150, 243, 0.5)' : 'none',
-          transition: 'box-shadow 0.2s',
-          '&:hover': { boxShadow: '0 0 4px rgba(255, 255, 255, 0.3)' },
+          border: isSelected
+            ? `2px solid ${colors.text.primary}`
+            : `1px solid ${trackColors.border}`,
+          boxShadow: isSelected
+            ? `0 0 12px ${trackColors.main}80, inset 0 1px 0 rgba(255,255,255,0.2)`
+            : isHovered
+            ? `0 2px 8px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1)`
+            : `inset 0 1px 0 rgba(255,255,255,0.1)`,
+          transition: 'all 0.15s ease',
+          '&::before': {
+            content: '""',
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: '50%',
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.1) 0%, transparent 100%)',
+            borderRadius: '6px 6px 0 0',
+            pointerEvents: 'none',
+          },
         }}
       >
-        <Typography variant="caption" sx={{ color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 11 }}>
+        <ClipIcon />
+        <Typography
+          variant="caption"
+          sx={{
+            color: colors.text.primary,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            fontSize: '0.7rem',
+            fontWeight: 500,
+            textShadow: '0 1px 2px rgba(0,0,0,0.3)',
+          }}
+        >
           {getClipLabel()}
+        </Typography>
+
+        {/* Duration indicator */}
+        <Typography
+          variant="caption"
+          sx={{
+            ml: 'auto',
+            color: 'rgba(255,255,255,0.7)',
+            fontSize: '0.6rem',
+            fontFamily: 'monospace',
+          }}
+        >
+          {(item.positionEnd - item.positionStart).toFixed(1)}s
         </Typography>
       </Box>
 
