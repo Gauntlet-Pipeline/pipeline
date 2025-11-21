@@ -97,6 +97,19 @@ async def agent_4_process(
         confirmed_facts = video_session_data.get("confirmed_facts")
         generation_script = video_session_data.get("generated_script")
         logger.info(f"Agent4 extracted data from video_session: topic={bool(topic)}, confirmed_facts={bool(confirmed_facts)}, generated_script={bool(generation_script)}")
+        
+        # Debug: Log the structure of generation_script
+        if generation_script:
+            logger.info(f"Agent4 generation_script type: {type(generation_script)}")
+            if isinstance(generation_script, dict):
+                logger.info(f"Agent4 generation_script keys: {list(generation_script.keys())}")
+                # Log first level of nested structure
+                for key in list(generation_script.keys())[:5]:  # Limit to first 5 keys
+                    value = generation_script[key]
+                    if isinstance(value, dict):
+                        logger.info(f"Agent4 generation_script['{key}'] is dict with keys: {list(value.keys())}")
+                    else:
+                        logger.info(f"Agent4 generation_script['{key}'] type: {type(value)}")
     
     # Extract script from generation_script (same as Agent2 does)
     if not script and generation_script:
@@ -104,6 +117,14 @@ async def agent_4_process(
         script = extract_script_from_generated_script(generation_script)
         if script:
             logger.info(f"Agent4 extracted script from generation_script for session {session_id}")
+            logger.info(f"Agent4 extracted script keys: {list(script.keys())}")
+            # Log what fields each part has
+            for part_name in ["hook", "concept", "process", "conclusion"]:
+                if part_name in script and isinstance(script[part_name], dict):
+                    part_keys = list(script[part_name].keys())
+                    logger.info(f"Agent4 script['{part_name}'] keys: {part_keys}")
+        else:
+            logger.warning(f"Agent4 extract_script_from_generated_script returned None or empty for session {session_id}")
     
     # If script is still empty, wait for Agent2 to write it (they run in parallel)
     if not script and db is not None:
