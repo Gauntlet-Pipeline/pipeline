@@ -1,10 +1,72 @@
 'use client';
 
 import { useState } from 'react';
-import { Box, IconButton, Button, Tooltip, Divider, Select, MenuItem, Typography, Slider } from '@mui/material';
-import { PlayArrow, Pause, SkipPrevious, SkipNext, VolumeUp, VolumeOff, Undo, Redo, ContentCut, ContentCopy, ContentPaste, Delete, ZoomIn, ZoomOut, FileDownload, Save } from '@mui/icons-material';
+import { Box, IconButton, Button, Tooltip, Select, MenuItem, Typography, Slider, type SelectChangeEvent } from '@mui/material';
+import { PlayArrow, Pause, SkipPrevious, SkipNext, VolumeUp, VolumeOff, Undo, Redo, ContentCut, ContentCopy, ContentPaste, Delete, ZoomIn, ZoomOut, FileDownload, FolderOpen } from '@mui/icons-material';
 import { useEditorStore, selectCanUndo, selectCanRedo } from '@/stores/editorStore';
+import { colors } from './theme';
 import { ExportDialog } from './ExportDialog';
+
+// Styled button group wrapper
+function ButtonGroup({ children }: { children: React.ReactNode }) {
+  return (
+    <Box
+      sx={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 0.5,
+        bgcolor: colors.bg.darker,
+        borderRadius: 1.5,
+        p: 0.5,
+        border: `1px solid ${colors.border.subtle}`,
+      }}
+    >
+      {children}
+    </Box>
+  );
+}
+
+// Styled icon button with better visuals
+function ToolbarIconButton({
+  onClick,
+  disabled,
+  tooltip,
+  children,
+  active,
+}: {
+  onClick?: () => void;
+  disabled?: boolean;
+  tooltip: string;
+  children: React.ReactNode;
+  active?: boolean;
+}) {
+  return (
+    <Tooltip title={tooltip} arrow>
+      <span>
+        <IconButton
+          size="small"
+          onClick={onClick}
+          disabled={disabled}
+          sx={{
+            color: active ? colors.primary.main : colors.text.secondary,
+            bgcolor: active ? `${colors.primary.main}20` : 'transparent',
+            '&:hover': {
+              bgcolor: colors.bg.hover,
+              color: colors.text.primary,
+            },
+            '&.Mui-disabled': {
+              color: colors.text.muted,
+              opacity: 0.5,
+            },
+            transition: 'all 0.15s ease',
+          }}
+        >
+          {children}
+        </IconButton>
+      </span>
+    </Tooltip>
+  );
+}
 
 export function Toolbar() {
   const [exportOpen, setExportOpen] = useState(false);
@@ -43,32 +105,127 @@ export function Toolbar() {
 
   return (
     <>
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 2, py: 1, bgcolor: 'background.paper', borderBottom: 1, borderColor: 'divider' }}>
-        <Tooltip title="Save Project"><IconButton size="small"><Save fontSize="small" /></IconButton></Tooltip>
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1.5,
+          px: 2,
+          py: 1,
+          bgcolor: colors.bg.paper,
+          borderBottom: `1px solid ${colors.border.subtle}`,
+          background: `linear-gradient(180deg, ${colors.bg.elevated} 0%, ${colors.bg.paper} 100%)`,
+        }}
+      >
+        {/* Project actions */}
+        <ButtonGroup>
+          <ToolbarIconButton tooltip="Open Project">
+            <FolderOpen sx={{ fontSize: 18 }} />
+          </ToolbarIconButton>
+        </ButtonGroup>
 
-        <Divider orientation="vertical" flexItem sx={{ mx: 1 }} />
+        {/* History */}
+        <ButtonGroup>
+          <ToolbarIconButton tooltip="Undo (Ctrl+Z)" onClick={undo} disabled={!canUndo}>
+            <Undo sx={{ fontSize: 18 }} />
+          </ToolbarIconButton>
+          <ToolbarIconButton tooltip="Redo (Ctrl+Shift+Z)" onClick={redo} disabled={!canRedo}>
+            <Redo sx={{ fontSize: 18 }} />
+          </ToolbarIconButton>
+        </ButtonGroup>
 
-        <Tooltip title="Undo (Ctrl+Z)"><span><IconButton size="small" onClick={undo} disabled={!canUndo}><Undo fontSize="small" /></IconButton></span></Tooltip>
-        <Tooltip title="Redo (Ctrl+Shift+Z)"><span><IconButton size="small" onClick={redo} disabled={!canRedo}><Redo fontSize="small" /></IconButton></span></Tooltip>
+        {/* Clipboard */}
+        <ButtonGroup>
+          <ToolbarIconButton tooltip="Cut (Ctrl+X)" onClick={cut} disabled={selectedIds.length === 0}>
+            <ContentCut sx={{ fontSize: 18 }} />
+          </ToolbarIconButton>
+          <ToolbarIconButton tooltip="Copy (Ctrl+C)" onClick={copy} disabled={selectedIds.length === 0}>
+            <ContentCopy sx={{ fontSize: 18 }} />
+          </ToolbarIconButton>
+          <ToolbarIconButton tooltip="Paste (Ctrl+V)" onClick={() => paste()}>
+            <ContentPaste sx={{ fontSize: 18 }} />
+          </ToolbarIconButton>
+          <ToolbarIconButton tooltip="Delete (Del)" onClick={deleteSelected} disabled={selectedIds.length === 0}>
+            <Delete sx={{ fontSize: 18 }} />
+          </ToolbarIconButton>
+        </ButtonGroup>
 
-        <Divider orientation="vertical" flexItem sx={{ mx: 1 }} />
+        {/* Playback controls */}
+        <ButtonGroup>
+          <ToolbarIconButton tooltip="Go to Start" onClick={() => setCurrentTime(0)}>
+            <SkipPrevious sx={{ fontSize: 18 }} />
+          </ToolbarIconButton>
+          <ToolbarIconButton tooltip={isPlaying ? 'Pause (Space)' : 'Play (Space)'} onClick={togglePlayPause} active={isPlaying}>
+            {isPlaying ? <Pause sx={{ fontSize: 20 }} /> : <PlayArrow sx={{ fontSize: 20 }} />}
+          </ToolbarIconButton>
+          <ToolbarIconButton tooltip="Go to End" onClick={() => setCurrentTime(duration)}>
+            <SkipNext sx={{ fontSize: 18 }} />
+          </ToolbarIconButton>
+        </ButtonGroup>
 
-        <Tooltip title="Cut (Ctrl+X)"><span><IconButton size="small" onClick={cut} disabled={selectedIds.length === 0}><ContentCut fontSize="small" /></IconButton></span></Tooltip>
-        <Tooltip title="Copy (Ctrl+C)"><span><IconButton size="small" onClick={copy} disabled={selectedIds.length === 0}><ContentCopy fontSize="small" /></IconButton></span></Tooltip>
-        <Tooltip title="Paste (Ctrl+V)"><IconButton size="small" onClick={() => paste()}><ContentPaste fontSize="small" /></IconButton></Tooltip>
-        <Tooltip title="Delete (Del)"><span><IconButton size="small" onClick={deleteSelected} disabled={selectedIds.length === 0}><Delete fontSize="small" /></IconButton></span></Tooltip>
+        {/* Timecode display */}
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1,
+            bgcolor: colors.bg.darkest,
+            borderRadius: 1.5,
+            px: 1.5,
+            py: 0.75,
+            border: `1px solid ${colors.border.subtle}`,
+          }}
+        >
+          <Typography
+            variant="body2"
+            sx={{
+              fontFamily: '"SF Mono", "Fira Code", "Consolas", monospace',
+              fontSize: '0.8rem',
+              fontWeight: 500,
+              color: colors.primary.light,
+              letterSpacing: '0.05em',
+            }}
+          >
+            {formatTime(currentTime)}
+          </Typography>
+          <Typography
+            variant="body2"
+            sx={{
+              fontFamily: '"SF Mono", "Fira Code", "Consolas", monospace',
+              fontSize: '0.7rem',
+              color: colors.text.muted,
+            }}
+          >
+            /
+          </Typography>
+          <Typography
+            variant="body2"
+            sx={{
+              fontFamily: '"SF Mono", "Fira Code", "Consolas", monospace',
+              fontSize: '0.8rem',
+              fontWeight: 500,
+              color: colors.text.secondary,
+              letterSpacing: '0.05em',
+            }}
+          >
+            {formatTime(duration)}
+          </Typography>
+        </Box>
 
-        <Divider orientation="vertical" flexItem sx={{ mx: 1 }} />
-
-        <Tooltip title="Go to Start"><IconButton size="small" onClick={() => setCurrentTime(0)}><SkipPrevious fontSize="small" /></IconButton></Tooltip>
-        <Tooltip title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}><IconButton size="small" onClick={togglePlayPause}>{isPlaying ? <Pause fontSize="small" /> : <PlayArrow fontSize="small" />}</IconButton></Tooltip>
-        <Tooltip title="Go to End"><IconButton size="small" onClick={() => setCurrentTime(duration)}><SkipNext fontSize="small" /></IconButton></Tooltip>
-
-        <Typography variant="body2" sx={{ fontFamily: 'monospace', minWidth: 120, textAlign: 'center', bgcolor: 'background.default', px: 1, py: 0.5, borderRadius: 1 }}>
-          {formatTime(currentTime)} / {formatTime(duration)}
-        </Typography>
-
-        <Select size="small" value={playbackRate} onChange={(e) => setPlaybackRate(e.target.value as number)} sx={{ minWidth: 80 }}>
+        {/* Speed selector */}
+        <Select
+          size="small"
+          value={playbackRate}
+          onChange={(e: SelectChangeEvent<number>) => setPlaybackRate(e.target.value as number)}
+          sx={{
+            minWidth: 70,
+            height: 32,
+            '& .MuiSelect-select': {
+              py: 0.5,
+              fontSize: '0.8rem',
+            },
+          }}
+        >
           <MenuItem value={0.25}>0.25x</MenuItem>
           <MenuItem value={0.5}>0.5x</MenuItem>
           <MenuItem value={1}>1x</MenuItem>
@@ -76,17 +233,56 @@ export function Toolbar() {
           <MenuItem value={2}>2x</MenuItem>
         </Select>
 
-        <Tooltip title={isMuted ? 'Unmute' : 'Mute'}><IconButton size="small" onClick={() => setMuted(!isMuted)}>{isMuted ? <VolumeOff fontSize="small" /> : <VolumeUp fontSize="small" />}</IconButton></Tooltip>
-        <Slider size="small" value={isMuted ? 0 : volume} onChange={(_, value) => setVolume(value as number)} sx={{ width: 80 }} />
+        {/* Volume */}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+          <ToolbarIconButton tooltip={isMuted ? 'Unmute' : 'Mute'} onClick={() => setMuted(!isMuted)}>
+            {isMuted ? <VolumeOff sx={{ fontSize: 18 }} /> : <VolumeUp sx={{ fontSize: 18 }} />}
+          </ToolbarIconButton>
+          <Slider
+            size="small"
+            value={isMuted ? 0 : volume}
+            onChange={(_, value) => setVolume(value as number)}
+            sx={{
+              width: 70,
+              '& .MuiSlider-thumb': {
+                width: 12,
+                height: 12,
+              },
+            }}
+          />
+        </Box>
 
+        {/* Spacer */}
         <Box sx={{ flex: 1 }} />
 
-        <Tooltip title="Zoom Out"><IconButton size="small" onClick={zoomOut}><ZoomOut fontSize="small" /></IconButton></Tooltip>
-        <Tooltip title="Zoom In"><IconButton size="small" onClick={zoomIn}><ZoomIn fontSize="small" /></IconButton></Tooltip>
+        {/* Zoom */}
+        <ButtonGroup>
+          <ToolbarIconButton tooltip="Zoom Out" onClick={zoomOut}>
+            <ZoomOut sx={{ fontSize: 18 }} />
+          </ToolbarIconButton>
+          <ToolbarIconButton tooltip="Zoom In" onClick={zoomIn}>
+            <ZoomIn sx={{ fontSize: 18 }} />
+          </ToolbarIconButton>
+        </ButtonGroup>
 
-        <Divider orientation="vertical" flexItem sx={{ mx: 1 }} />
-
-        <Button variant="contained" size="small" startIcon={<FileDownload />} onClick={() => setExportOpen(true)}>Export</Button>
+        {/* Export button */}
+        <Button
+          variant="contained"
+          size="small"
+          startIcon={<FileDownload sx={{ fontSize: 18 }} />}
+          onClick={() => setExportOpen(true)}
+          sx={{
+            px: 2,
+            py: 0.75,
+            fontWeight: 600,
+            boxShadow: `0 2px 8px ${colors.primary.glow}`,
+            '&:hover': {
+              boxShadow: `0 4px 16px ${colors.primary.glow}`,
+            },
+          }}
+        >
+          Export
+        </Button>
       </Box>
 
       <ExportDialog open={exportOpen} onClose={() => setExportOpen(false)} />
