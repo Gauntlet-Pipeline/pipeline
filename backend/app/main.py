@@ -210,23 +210,6 @@ async def scaffoldtest_ui():
     return FileResponse(html_file)
 
 
-@app.get("/videotest", response_class=HTMLResponse)
-@app.get("/video_test.html", response_class=HTMLResponse)
-async def video_test_ui():
-    """
-    Serve the video test HTML page.
-
-    Access at: http://localhost:8000/videotest or /video_test.html
-    """
-    backend_dir = Path(__file__).parent.parent
-    html_file = backend_dir / "video_test.html"
-
-    if not html_file.exists():
-        raise HTTPException(status_code=404, detail="video_test.html not found")
-
-    return FileResponse(html_file)
-
-
 # =============================================================================
 # Agent Processing Functions (Scaffolding)
 # Import agents from agents folder
