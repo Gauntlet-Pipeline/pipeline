@@ -55,6 +55,27 @@ def _get_openai_api_key() -> Optional[str]:
         return key
 
 
+def _get_replicate_api_key() -> Optional[str]:
+    """
+    Get REPLICATE_API_KEY from AWS Secrets Manager with fallback to settings.
+    
+    Returns:
+        Replicate API key string, or None if not found
+    """
+    try:
+        from app.services.secrets import get_secret
+        return get_secret("pipeline/replicate-api-key")
+    except Exception as e:
+        logger.debug(f"Could not retrieve REPLICATE_API_KEY from Secrets Manager: {e}, falling back to settings")
+        key = settings.REPLICATE_API_KEY
+        if not key:
+            logger.warning(
+                "REPLICATE_API_KEY not set in Secrets Manager or settings - "
+                "video and image generation will fail."
+            )
+        return key
+
+
 def _write_errors_json(storage_service: StorageService, session_folder: str, error_data: Dict[str, Any]) -> None:
     """
     Write errors.json to the session folder in S3.
@@ -132,7 +153,7 @@ class VideoGenerationOrchestrator:
 
         # Initialize AI agents
         openai_api_key = _get_openai_api_key()
-        replicate_api_key = settings.REPLICATE_API_KEY
+        replicate_api_key = _get_replicate_api_key()
 
         if not openai_api_key:
             logger.warning(
@@ -142,8 +163,8 @@ class VideoGenerationOrchestrator:
 
         if not replicate_api_key:
             logger.warning(
-                "REPLICATE_API_KEY not set - some agents will fail at runtime. "
-                "Add it to .env file."
+                "REPLICATE_API_KEY not set - video and image generation will fail. "
+                "Add it to AWS Secrets Manager (pipeline/replicate-api-key) or .env file."
             )
 
         self.prompt_parser = PromptParserAgent(replicate_api_key) if replicate_api_key else None
@@ -2985,8 +3006,8 @@ class VideoGenerationOrchestrator:
                 {"message": "Orchestrator starting Full Test process"}
             )
             
-            # Create S3 folder structure: {userId}/{sessionId}/
-            s3_folder_prefix = f"{userId}/{sessionId}/"
+            # Create S3 folder structure: users/{userId}/{sessionId}/
+            s3_folder_prefix = f"users/{userId}/{sessionId}/"
             
             # Create timestamp.json with Unix timestamp
             timestamp = int(time.time())
@@ -3142,19 +3163,31 @@ class VideoGenerationOrchestrator:
                 userId, sessionId, "processing",
                 {"message": "Agent2 and Agent4 completed, starting Agent5"}
             )
-            
+
+            # Load agent_4_output.json from S3 which contains both agent_2_data and agent_4_data
+            pipeline_data = None
             try:
-                # Agent5 will scan S3 folders to discover content
+                agent4_output_key = f"users/{userId}/{sessionId}/agent4/agent_4_output.json"
+                response = self.storage_service.s3_client.get_object(
+                    Bucket=self.storage_service.bucket_name,
+                    Key=agent4_output_key
+                )
+                pipeline_data = json.loads(response['Body'].read().decode('utf-8'))
+                logger.info(f"Orchestrator loaded agent_4_output.json for Agent5: {agent4_output_key}")
+            except Exception as e:
+                logger.warning(f"Orchestrator could not load agent_4_output.json, Agent5 will scan S3: {e}")
+
+            try:
                 # Generate supersessionid for Agent5
                 agent5_supersessionid = f"{sessionId}_{secrets.token_urlsafe(12)[:16]}"
-                
+
                 agent5_result = await agent_5_process(
                     websocket_manager=None,  # Not used - using callback instead
                     user_id=userId,
                     session_id=sessionId,
                     supersessionid=agent5_supersessionid,
                     storage_service=self.storage_service,
-                    pipeline_data=None,  # Agent5 will scan S3 instead
+                    pipeline_data=pipeline_data,  # Pass combined data from agent_4_output.json
                     generation_mode="video",
                     db=db,
                     status_callback=status_callback

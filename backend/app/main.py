@@ -864,7 +864,7 @@ async def restart_agent5_concat(request: RestartAgent5Request, db: Session = Dep
     # Verify clips exist in S3 before starting
     try:
         sections = ["hook", "concept", "process", "conclusion"]
-        agent5_prefix = f"{request.userID}/{request.sessionID}/agent5/"
+        agent5_prefix = f"users/{request.userID}/{request.sessionID}/agent5/"
         
         missing_clips = []
         for section in sections:
@@ -1600,7 +1600,7 @@ async def render_animated_video(request: AnimatedVideoRequest) -> AgentTestRespo
                 capture_output=True,
                 text=True,
                 shell=True,
-                env={**os.environ, "PATH": f"/Users/mfuechec/.bun/bin:{os.environ.get('PATH', '')}"}
+                env={**os.environ, "PATH": f"/Users/mus-east-2/.bun/bin:{os.environ.get('PATH', '')}"}
             )
 
             if result.returncode != 0:

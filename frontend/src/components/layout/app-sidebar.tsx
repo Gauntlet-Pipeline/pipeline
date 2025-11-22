@@ -145,6 +145,7 @@ export function AppSidebar({
                   return (
                     <Collapsible
                       key={item.title}
+                      id="sidebar-history-collapsible"
                       asChild
                       defaultOpen={isOnHistoryRoute}
                     >

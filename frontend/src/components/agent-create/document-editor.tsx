@@ -8,9 +8,12 @@ import {
   Circle,
   ListChecks,
   FileText,
+  User,
 } from "lucide-react";
 import { useState, type HTMLAttributes } from "react";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { NarrationEditor } from "./narration-editor";
 import { useAgentCreateStore } from "@/stores/agent-create-store";
 
@@ -26,6 +29,10 @@ export function DocumentEditor({ className, ...props }: DocumentEditorProps) {
     selectedFacts,
     narration,
     factsLocked,
+    childAge,
+    childInterest,
+    showFactSelectionPrompt,
+    thinkingStatus,
     toggleFact,
     handleSubmitFacts,
   } = useAgentCreateStore();
@@ -44,6 +51,13 @@ export function DocumentEditor({ className, ...props }: DocumentEditorProps) {
   const hasScript = narration !== null;
   const showToggleButtons =
     hasConfirmedFacts && hasScript && mode !== "select-facts";
+
+  // Check if we have student info
+  const hasStudentInfo = childAge ?? childInterest;
+
+  // Check if we're currently extracting facts
+  const isExtractingFacts =
+    isLoading && thinkingStatus?.operation === "extracting";
 
   return (
     <div
@@ -79,7 +93,7 @@ export function DocumentEditor({ className, ...props }: DocumentEditorProps) {
             Updating...
           </span>
         )}
-        {mode === "select-facts" && (
+        {mode === "select-facts" && !showFactSelectionPrompt && (
           <Button
             size="sm"
             onClick={handleSubmitFacts}
@@ -92,11 +106,56 @@ export function DocumentEditor({ className, ...props }: DocumentEditorProps) {
       </div>
       <ScrollArea className="max-h-[calc(100vh-60px)] flex-1">
         <div className="h-full p-4">
-          {mode === "edit" ? (
-            <div className="text-muted-foreground text-sm">
-              Use the chat to provide content for fact extraction.
+          {hasStudentInfo && (
+            <div className="bg-muted/50 mb-4 rounded-lg border p-3">
+              <div className="mb-2 flex items-center gap-2">
+                <User className="text-muted-foreground size-4" />
+                <h3 className="text-sm font-semibold">Student Information</h3>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {childAge && (
+                  <Badge variant="secondary" className="text-xs">
+                    Age: {childAge}
+                  </Badge>
+                )}
+                {childInterest && (
+                  <Badge variant="secondary" className="text-xs">
+                    Interest: {childInterest}
+                  </Badge>
+                )}
+              </div>
             </div>
-          ) : mode === "select-facts" ? (
+          )}
+
+          {/* Loading state: Show skeleton cards while extracting facts */}
+          {isExtractingFacts && (
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {Array.from({ length: 6 }).map((_, index) => (
+                <div
+                  key={index}
+                  className="rounded-lg border border-border bg-card p-4"
+                >
+                  <div className="mb-2 flex items-start justify-between gap-2">
+                    <Skeleton className="h-5 w-3/4" />
+                    <Skeleton className="size-4 rounded-full" />
+                  </div>
+                  <div className="space-y-2">
+                    <Skeleton className="h-4 w-full" />
+                    <Skeleton className="h-4 w-5/6" />
+                    <Skeleton className="h-4 w-4/6" />
+                  </div>
+                  <Skeleton className="mt-2 h-3 w-24" />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!isExtractingFacts && mode === "edit" ? (
+            <div className="text-muted-foreground text-sm">
+              Start a conversation to share lesson materials. You can optionally
+              provide student age and interests for personalization.
+            </div>
+          ) : !isExtractingFacts && mode === "select-facts" ? (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {(factsLocked ? selectedFacts : facts).map((fact, index) => {
                 const isSelected = selectedFacts.some(
@@ -134,7 +193,7 @@ export function DocumentEditor({ className, ...props }: DocumentEditorProps) {
                 );
               })}
             </div>
-          ) : showToggleButtons ? (
+          ) : !isExtractingFacts && showToggleButtons ? (
             viewMode === "facts" ? (
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 {selectedFacts.map((fact, index) => (
@@ -159,7 +218,7 @@ export function DocumentEditor({ className, ...props }: DocumentEditorProps) {
               narration && <NarrationEditor />
             )
           ) : (
-            narration && <NarrationEditor />
+            !isExtractingFacts && narration && <NarrationEditor />
           )}
         </div>
       </ScrollArea>
