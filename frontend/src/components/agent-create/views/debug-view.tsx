@@ -133,9 +133,9 @@ export function DebugView({ sessionId }: DebugViewProps) {
   );
 
   return (
-    <ResizablePanelGroup direction="horizontal" className="h-full">
+    <ResizablePanelGroup direction="horizontal" className="h-full w-full">
       {/* Left: File tree */}
-      <ResizablePanel defaultSize={40} minSize={20}>
+      <ResizablePanel defaultSize={30} minSize={10}>
         <div className="flex h-full flex-col border-r">
           <div className="border-b p-3">
             <h3 className="font-semibold">Session Files</h3>
@@ -143,7 +143,7 @@ export function DebugView({ sessionId }: DebugViewProps) {
               JSON files from S3 bucket
             </p>
           </div>
-          <ScrollArea className="h-[calc(100vh-200px)]">
+          <ScrollArea className="flex-1">
             <div className="p-2">
               {/* Root folder */}
               <FolderItem
@@ -167,12 +167,12 @@ export function DebugView({ sessionId }: DebugViewProps) {
       <ResizableHandle />
 
       {/* Right: File content viewer */}
-      <ResizablePanel defaultSize={60} minSize={30}>
+      <ResizablePanel defaultSize={70} minSize={30}>
         <div className="flex h-full flex-col">
-          <div className="border-b p-3">
+          <div className="shrink-0 border-b p-3">
             <div className="flex items-center justify-between">
-              <div>
-                <h3 className="font-semibold">
+              <div className="min-w-0 flex-1">
+                <h3 className="truncate font-semibold">
                   {selectedFile ? selectedFile.name : "Select a file"}
                 </h3>
                 {selectedFile && (
@@ -186,6 +186,7 @@ export function DebugView({ sessionId }: DebugViewProps) {
                   size="sm"
                   variant="outline"
                   onClick={() => downloadFile(selectedFile)}
+                  className="ml-2 shrink-0"
                 >
                   <Download className="mr-2 size-4" />
                   Download
@@ -193,7 +194,7 @@ export function DebugView({ sessionId }: DebugViewProps) {
               )}
             </div>
           </div>
-          <ScrollArea className="h-[calc(100vh-200px)]">
+          <ScrollArea className="max-w-[60%] flex-1">
             <div className="p-4">
               {!selectedFile ? (
                 <div className="text-muted-foreground text-center">
@@ -219,7 +220,7 @@ export function DebugView({ sessionId }: DebugViewProps) {
                     );
                   }
                   return (
-                    <pre className="bg-muted overflow-auto rounded-lg p-4 text-xs">
+                    <pre className="bg-muted max-w-[80%] overflow-x-auto overflow-y-auto rounded-lg p-4 text-xs whitespace-pre">
                       {JSON.stringify(selectedFile.content, null, 2)}
                     </pre>
                   );
