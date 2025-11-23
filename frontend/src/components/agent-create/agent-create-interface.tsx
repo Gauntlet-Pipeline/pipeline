@@ -66,16 +66,10 @@ type AgentCreateInterfaceProps = {
    * If provided, the component will load the session data.
    */
   sessionId?: string | null;
-  /**
-   * Whether to show the "New Chat" button in the header.
-   * @default true
-   */
-  showNewChatButton?: boolean;
 };
 
 export function AgentCreateInterface({
   sessionId: externalSessionId,
-  showNewChatButton = true,
 }: AgentCreateInterfaceProps) {
   const {
     messages: storeMessages,
@@ -659,6 +653,7 @@ export function AgentCreateInterface({
               <PromptInput
                 onSubmit={handleSubmit}
                 accept=".pdf,application/pdf"
+                syncHiddenInput={true}
               >
                 <PromptInputBody>
                   <PromptInputAttachments>

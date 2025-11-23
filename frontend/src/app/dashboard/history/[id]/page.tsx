@@ -10,7 +10,5 @@ type Props = {
 export default function HistoryDetailPage({ params }: Props) {
   const { id: sessionId } = use(params);
 
-  return (
-    <AgentCreateInterface sessionId={sessionId} showNewChatButton={false} />
-  );
+  return <AgentCreateInterface sessionId={sessionId} />;
 }

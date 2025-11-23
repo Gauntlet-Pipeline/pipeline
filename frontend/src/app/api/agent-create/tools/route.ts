@@ -400,11 +400,28 @@ Be supportive and guide the teacher through the process naturally.`;
 
               // Extract and save assistant message from tool result if present
               try {
+                // Unwrap AI SDK tool result wrapper
+                let actualResult: unknown = toolResult;
+                if (typeof toolResult === "object" && toolResult !== null) {
+                  const wrapped = toolResult as {
+                    output?: unknown;
+                    type?: string;
+                  };
+                  if (
+                    wrapped.type === "tool-result" &&
+                    wrapped.output !== undefined
+                  ) {
+                    actualResult = wrapped.output;
+                  }
+                }
+
+                // Parse the actual tool result
                 const toolResultData = parseToolResult<{
                   message?: string;
                   facts?: unknown;
                   narration?: unknown;
-                }>(toolResult);
+                }>(actualResult);
+
                 if (toolResultData.message) {
                   saveConversationMessage(sessionId, {
                     role: "assistant",

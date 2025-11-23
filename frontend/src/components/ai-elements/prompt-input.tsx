@@ -194,6 +194,10 @@ export function PromptInputProvider({
       }
       return [];
     });
+    // Reset file input to allow re-selecting files
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
   }, []);
 
   const openFileDialog = useCallback(() => {
@@ -569,6 +573,10 @@ export const PromptInput = ({
               URL.revokeObjectURL(file.url);
             }
           }
+          // Reset file input to allow re-selecting files
+          if (inputRef.current) {
+            inputRef.current.value = "";
+          }
           return [];
         });
 
@@ -654,6 +662,8 @@ export const PromptInput = ({
   const handleChange: ChangeEventHandler<HTMLInputElement> = (event) => {
     if (event.currentTarget.files) {
       add(event.currentTarget.files);
+      // Reset the input so the same file can be selected again
+      event.currentTarget.value = "";
     }
   };
 
