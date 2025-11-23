@@ -599,7 +599,7 @@ async def start_processing(
                 await orchestrator.start_full_test_process(
                     userId=user_id,
                     sessionId=session_id,
-                    db=db
+                    db=db  # Pass db to orchestrator, which will pass it to agents for their own queries
                 )
                 logger.info(f"Orchestrator completed for session {session_id}")
             except Exception as e:

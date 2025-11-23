@@ -3026,7 +3026,7 @@ class VideoGenerationOrchestrator:
         self,
         userId: str,
         sessionId: str,
-        db: Session
+        db: Optional[Session] = None
     ) -> None:
         """
         Start the Full Test pipeline process.
@@ -3038,12 +3038,11 @@ class VideoGenerationOrchestrator:
         Args:
             userId: User identifier
             sessionId: Session identifier
-            db: Database session for querying video_session table
+            db: Optional database session to pass to agents (agents will query database themselves)
         """
         from app.agents.agent_2 import agent_2_process
         from app.agents.agent_4 import agent_4_process
         from app.agents.agent_5 import agent_5_process
-        from sqlalchemy import text as sql_text
         
         try:
             # Send orchestrator starting status
@@ -3132,38 +3131,8 @@ class VideoGenerationOrchestrator:
                 {"message": "Orchestrator triggering Agent2 and Agent4 in parallel"}
             )
             
-            # Query video_session table to verify it exists
-            try:
-                result = db.execute(
-                    sql_text(
-                        "SELECT * FROM video_session WHERE id = :session_id AND user_id = :user_id"
-                    ),
-                    {"session_id": sessionId, "user_id": userId},
-                ).fetchone()
-                
-                if not result:
-                    raise ValueError(f"Video session not found for session_id={sessionId} and user_id={userId}")
-                
-                # Convert result to dict if needed
-                if hasattr(result, "_mapping"):
-                    video_session_data = dict(result._mapping)
-                else:
-                    video_session_data = {
-                        "id": getattr(result, "id", None),
-                        "user_id": getattr(result, "user_id", None),
-                        "topic": getattr(result, "topic", None),
-                        "confirmed_facts": getattr(result, "confirmed_facts", None),
-                        "generated_script": getattr(result, "generated_script", None),
-                    }
-            except Exception as e:
-                logger.error(f"Error querying video_session: {e}")
-                await self._send_orchestrator_status(
-                    userId, sessionId, "error",
-                    {"error": str(e), "reason": f"Database query failed: {type(e).__name__}"}
-                )
-                raise
-            
             # Trigger Agent2 and Agent4 in parallel
+            # Agents will query the database themselves for video_session_data
             agent2_task = agent_2_process(
                 websocket_manager=None,  # Not used - using callback instead
                 user_id=userId,
@@ -3172,12 +3141,12 @@ class VideoGenerationOrchestrator:
                 chosen_diagram_id="",  # Not used in Full Test
                 script_id="",  # Not used in Full Test
                 storage_service=self.storage_service,
-                video_session_data=video_session_data,
-                db=db,
+                video_session_data=None,  # Agent2 will query database itself
+                db=db,  # Pass db so Agent2 can query if needed
                 status_callback=status_callback
             )
             
-            # Agent4 will extract script from video_session (same data as Agent2)
+            # Agent4 will query database itself for video_session_data
             agent4_task = agent_4_process(
                 websocket_manager=None,  # Not used - using callback instead
                 user_id=userId,
@@ -3187,8 +3156,8 @@ class VideoGenerationOrchestrator:
                 audio_option="tts",
                 storage_service=self.storage_service,
                 agent2_data=None,
-                video_session_data=video_session_data,  # Pass same data as Agent2
-                db=db,
+                video_session_data=None,  # Agent4 will query database itself
+                db=db,  # Pass db so Agent4 can query if needed
                 status_callback=status_callback
             )
             
