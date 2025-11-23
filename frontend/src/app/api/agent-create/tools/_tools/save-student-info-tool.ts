@@ -52,7 +52,7 @@ export const saveStudentInfoTool: Tool = {
 
       return JSON.stringify({
         success: true,
-        message: `Perfect! I'll personalize the video for a ${child_age}-year-old who loves ${child_interest}. Now, please share your biology lesson material - you can type it in, paste text, or upload a PDF.`,
+        message: `Perfect! I'll personalize the video for a ${child_age}-year-old who loves ${child_interest}. Now, please share your history lesson material - you can type it in, paste text, or upload a PDF.`,
         child_age,
         child_interest,
       });

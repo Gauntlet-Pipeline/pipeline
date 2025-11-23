@@ -133,7 +133,7 @@ Your task:
 3. Use age-appropriate language for ${ageContext}
 4. Include all provided facts and key concepts
 5. Provide visual guidance for each segment
-6. Ensure scientific accuracy${interestContext}
+6. Ensure historical accuracy${interestContext}
 
 Structure:
 
@@ -229,6 +229,6 @@ ${factsStr}
 
 Target Duration: ${targetDuration} seconds
 
-Generate an engaging, scientifically accurate educational script in JSON format.`;
+Generate an engaging, historically accurate educational script in JSON format.`;
   }
 }
