@@ -391,6 +391,7 @@
 
         <div class="tabs">
             <button type="button" class="tab-btn active" data-tab="pipeline">Full Pipeline</button>
+            <button type="button" class="tab-btn" data-tab="agent3">Test Agent 3</button>
             <button type="button" class="tab-btn" data-tab="agent4">Test Agent 4</button>
             <button type="button" class="tab-btn" data-tab="agent5">Test Agent 5</button>
             <button type="button" class="tab-btn" data-tab="scenetest">Scene Test</button>
@@ -507,14 +508,21 @@
                 <div class="status-text" id="status-agent2">Not triggered</div>
                 <div class="error-message" id="error-agent2"></div>
             </div>
-            
+
+            <div class="agent-status">
+                <span class="agent-label">Agent3</span>
+                <div class="status-light" id="light-agent3"></div>
+                <div class="status-text" id="status-agent3">Not triggered</div>
+                <div class="error-message" id="error-agent3"></div>
+            </div>
+
             <div class="agent-status">
                 <span class="agent-label">Agent4</span>
                 <div class="status-light" id="light-agent4"></div>
                 <div class="status-text" id="status-agent4">Not triggered</div>
                 <div class="error-message" id="error-agent4"></div>
             </div>
-            
+
             <div class="agent-status">
                 <span class="agent-label">Agent5</span>
                 <div class="status-light" id="light-agent5"></div>
@@ -538,6 +546,78 @@
                 <pre id="videoSessionDataContent" class="result-content"></pre>
             </div>
         </div>
+        </div>
+
+        <!-- Agent 3 Test Tab -->
+        <div id="agent3-tab" class="tab-content">
+            <h3 style="margin-bottom: 15px; color: #667eea;">Test Agent 3 - Educational Diagram Generator</h3>
+            <p style="margin-bottom: 15px; color: #666;">
+                Generate educational diagrams using Flux 1.1 Pro via Replicate. Agent3 creates visual diagrams based on topic, facts, and learning objectives.
+            </p>
+
+            <form id="agent3Form">
+                <div class="form-group">
+                    <label for="a3-sessionID">Session ID:</label>
+                    <input type="text" id="a3-sessionID" name="sessionID" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="a3-topic">Topic:</label>
+                    <input type="text" id="a3-topic" name="topic" placeholder="e.g., Photosynthesis" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="a3-learning-objective">Learning Objective:</label>
+                    <input type="text" id="a3-learning-objective" name="learning_objective" placeholder="e.g., Understand how plants make food">
+                </div>
+
+                <div class="form-group">
+                    <label for="a3-child-age">Child Age:</label>
+                    <input type="text" id="a3-child-age" name="child_age" placeholder="e.g., 8-10">
+                </div>
+
+                <div class="form-group">
+                    <label for="a3-child-interest">Child Interest:</label>
+                    <input type="text" id="a3-child-interest" name="child_interest" placeholder="e.g., Science, nature">
+                </div>
+
+                <div class="form-group">
+                    <label for="a3-confirmed-facts">Confirmed Facts (JSON array):</label>
+                    <textarea id="a3-confirmed-facts" name="confirmed_facts" rows="8" required>[
+  {
+    "concept": "Photosynthesis",
+    "details": "Plants use sunlight, water, and carbon dioxide to make food"
+  },
+  {
+    "concept": "Chlorophyll",
+    "details": "Green pigment in leaves that captures sunlight"
+  },
+  {
+    "concept": "Oxygen",
+    "details": "Plants release oxygen as a byproduct"
+  }
+]</textarea>
+                </div>
+
+                <button type="submit" class="submit-btn" id="a3-submitBtn">Generate Diagram</button>
+            </form>
+
+            <div class="result-section" id="a3-diagram-result" style="display: none;">
+                <h3>Generated Diagram</h3>
+                <img id="a3-diagram-image" style="width: 100%; max-width: 800px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" alt="Educational Diagram">
+                <div id="a3-diagram-info" style="margin-top: 10px; padding: 10px; background: #f5f5f5; border-radius: 4px; font-family: monospace; font-size: 12px;">
+                    Diagram info will appear here...
+                </div>
+                <p style="margin-top: 10px;">
+                    <a id="a3-diagram-download" href="#" download="educational_diagram.png" style="color: #667eea;">
+                        Download Diagram
+                    </a>
+                </p>
+            </div>
+
+            <div class="connection-status disconnected" id="a3-status">
+                Ready
+            </div>
         </div>
 
         <!-- Agent 4 Test Tab -->
@@ -845,12 +925,13 @@
         const agentStatuses = {
             'Orchestrator': { light: null, text: null, error: null },
             'Agent2': { light: null, text: null, error: null },
+            'Agent3': { light: null, text: null, error: null },
             'Agent4': { light: null, text: null, error: null },
             'Agent5': { light: null, text: null, error: null }
         };
 
         // Initialize agent status elements
-        ['Orchestrator', 'Agent2', 'Agent4', 'Agent5'].forEach(agent => {
+        ['Orchestrator', 'Agent2', 'Agent3', 'Agent4', 'Agent5'].forEach(agent => {
             agentStatuses[agent] = {
                 light: document.getElementById(`light-${agent.toLowerCase()}`),
                 text: document.getElementById(`status-${agent.toLowerCase()}`),
@@ -864,7 +945,7 @@
 
         // Reset all agent status lights to black
         function resetAgentStatuses() {
-            ['Orchestrator', 'Agent2', 'Agent4', 'Agent5'].forEach(agent => {
+            ['Orchestrator', 'Agent2', 'Agent3', 'Agent4', 'Agent5'].forEach(agent => {
                 const status = agentStatuses[agent];
                 if (status.light && status.text && status.error) {
                     status.light.className = 'status-light';
@@ -1093,8 +1174,24 @@
                                     }
                                 }
                                 
+                                // If Agent3 finished and has diagram_url, display it
+                                if (message.agentnumber === 'Agent3' && message.status === 'finished' && message.diagram_url) {
+                                    console.log('Agent3 Diagram URL received:', message.diagram_url);
+                                    const diagramResult = document.getElementById('a3-diagram-result');
+                                    const diagramImage = document.getElementById('a3-diagram-image');
+                                    const diagramInfo = document.getElementById('a3-diagram-info');
+                                    const diagramDownload = document.getElementById('a3-diagram-download');
+
+                                    if (diagramResult && diagramImage && diagramInfo && diagramDownload) {
+                                        diagramImage.src = message.diagram_url;
+                                        diagramDownload.href = message.diagram_url;
+                                        diagramInfo.innerHTML = `<strong>Educational Diagram Generated!</strong><br>Topic: ${message.topic || 'N/A'}`;
+                                        diagramResult.style.display = 'block';
+                                    }
+                                }
+
                                 // If Agent5 or Orchestrator finished and has videoUrl, display it
-                                if ((message.agentnumber === 'Agent5' || message.agentnumber === 'Orchestrator') && 
+                                if ((message.agentnumber === 'Agent5' || message.agentnumber === 'Orchestrator') &&
                                     message.status === 'finished' && message.videoUrl) {
                                     console.log('Video URL received:', message.videoUrl);
                                     const videoResult = document.getElementById('video-result');
@@ -1349,6 +1446,90 @@
                 infoElement.textContent = 'Loading video...';
             };
         }
+
+        // Agent 3 Form Submission
+        const agent3Form = document.getElementById('agent3Form');
+        const a3SubmitBtn = document.getElementById('a3-submitBtn');
+        const a3Status = document.getElementById('a3-status');
+        const a3DiagramResult = document.getElementById('a3-diagram-result');
+        const a3DiagramImage = document.getElementById('a3-diagram-image');
+        const a3DiagramInfo = document.getElementById('a3-diagram-info');
+        const a3DiagramDownload = document.getElementById('a3-diagram-download');
+
+        agent3Form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const sessionId = document.getElementById('a3-sessionID').value.trim();
+            const topic = document.getElementById('a3-topic').value.trim();
+            const learningObjective = document.getElementById('a3-learning-objective').value.trim();
+            const childAge = document.getElementById('a3-child-age').value.trim();
+            const childInterest = document.getElementById('a3-child-interest').value.trim();
+            const confirmedFactsText = document.getElementById('a3-confirmed-facts').value.trim();
+
+            // Parse and validate confirmed facts JSON
+            let confirmedFacts;
+            try {
+                confirmedFacts = JSON.parse(confirmedFactsText);
+            } catch (err) {
+                alert('Invalid JSON in confirmed facts field: ' + err.message);
+                return;
+            }
+
+            // Disable button and show processing state
+            a3SubmitBtn.disabled = true;
+            a3SubmitBtn.textContent = 'Generating Diagram...';
+            a3Status.className = 'connection-status connecting';
+            a3Status.textContent = 'Generating educational diagram... This may take 30-60 seconds.';
+            a3DiagramResult.style.display = 'none';
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/agent3/test`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        session_id: sessionId,
+                        topic: topic,
+                        learning_objective: learningObjective,
+                        child_age: childAge,
+                        child_interest: childInterest,
+                        confirmed_facts: confirmedFacts
+                    })
+                });
+
+                const result = await response.json();
+
+                if (response.ok && result.success) {
+                    // Display success results
+                    a3Status.className = 'connection-status connected';
+                    a3Status.textContent = 'Diagram Generated Successfully!';
+                    a3DiagramResult.style.display = 'block';
+
+                    // Display diagram
+                    if (result.data && result.data.diagram_url) {
+                        a3DiagramImage.src = result.data.diagram_url;
+                        a3DiagramDownload.href = result.data.diagram_url;
+                        a3DiagramInfo.innerHTML = `
+                            <strong>Educational Diagram Generated!</strong><br>
+                            Topic: ${result.data.topic || 'N/A'}<br>
+                            Learning Objective: ${learningObjective || 'N/A'}<br>
+                            Target Age: ${childAge || 'N/A'}
+                        `;
+                    }
+                } else {
+                    throw new Error(result.error || result.detail || 'Agent 3 processing failed');
+                }
+            } catch (error) {
+                console.error('Agent 3 error:', error);
+                a3Status.className = 'connection-status disconnected';
+                a3Status.textContent = `Error: ${error.message}`;
+                a3DiagramResult.style.display = 'none';
+            } finally {
+                a3SubmitBtn.disabled = false;
+                a3SubmitBtn.textContent = 'Generate Diagram';
+            }
+        });
 
         // Agent 4 Form Submission
         const agent4Form = document.getElementById('agent4Form');

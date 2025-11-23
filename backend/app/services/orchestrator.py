@@ -1764,7 +1764,7 @@ class VideoGenerationOrchestrator:
         
         # Extract paths using StorageService helpers
         segments_s3_key = s3_path
-        diagram_s3_key = self.storage_service.get_session_path(user_id, session_id, "images", "diagram.png")
+        diagramS3 = self.storage_service.get_session_path(user_id, session_id, "images", "diagram.png")
         config_s3_key = self.storage_service.get_session_path(user_id, session_id, "images", "config.json")
         status_s3_key = self.storage_service.get_session_path(user_id, session_id, "images", "status.json")
         # Create timestamp file for reference
@@ -1810,9 +1810,9 @@ class VideoGenerationOrchestrator:
             
             # Check if diagram exists
             diagram_s3_path = None
-            if self.storage_service.file_exists(diagram_s3_key):
-                diagram_s3_path = diagram_s3_key
-                logger.info(f"[{session_id}] Found diagram.png at: {diagram_s3_key}")
+            if self.storage_service.file_exists(diagramS3):
+                diagram_s3_path = diagramS3
+                logger.info(f"[{session_id}] Found diagram.png at: {diagramS3}")
             else:
                 logger.warning(f"[{session_id}] No diagram.png found, images will be generated without style reference")
             
@@ -2171,9 +2171,9 @@ class VideoGenerationOrchestrator:
         
         # Check if diagram exists
         diagram_s3_path = None
-        diagram_s3_key = self.storage_service.get_session_path(user_id, session_id, "images", "diagram.png")
-        if self.storage_service.file_exists(diagram_s3_key):
-            diagram_s3_path = diagram_s3_key
+        diagramS3 = self.storage_service.get_session_path(user_id, session_id, "images", "diagram.png")
+        if self.storage_service.file_exists(diagramS3):
+            diagram_s3_path = diagramS3
 
         # Initialize cumulative status items for all images and audio BEFORE creating AgentInputs
         num_images_per_segment = image_options.get("num_images", 2)
@@ -2641,7 +2641,7 @@ class VideoGenerationOrchestrator:
         user_id: int,
         image_result: Any,
         audio_files: List[Dict[str, Any]],
-        diagram_s3_key: str,
+        diagramS3: str,
         segments: List[Dict[str, Any]],
         output_s3_prefix: str,
         template_title: str
@@ -2658,7 +2658,7 @@ class VideoGenerationOrchestrator:
             user_id: User ID
             image_result: AgentOutput from story image generator
             audio_result: AgentOutput from audio pipeline
-            diagram_s3_key: S3 key to diagram.png
+            diagramS3: S3 key to diagram.png
             segments: List of parsed segments
             output_s3_prefix: S3 prefix for output
             template_title: Template title
@@ -2696,9 +2696,9 @@ class VideoGenerationOrchestrator:
         
         # Check if diagram exists (optional - will fallback to generated images)
         diagram_url = None
-        if self.storage_service.file_exists(diagram_s3_key):
+        if self.storage_service.file_exists(diagramS3):
             diagram_url = self.storage_service.generate_presigned_url(
-                diagram_s3_key,
+                diagramS3,
                 expires_in=3600
             )
             logger.info(f"[{session_id}] Using diagram for video generation")
@@ -2892,7 +2892,7 @@ class VideoGenerationOrchestrator:
                 )
 
                 # Fallback: use static image (diagram or first generated image)
-                fallback_image_key = diagram_s3_key if diagram_url else (generated_images[0].get("s3_key") if generated_images else None)
+                fallback_image_key = diagramS3 if diagram_url else (generated_images[0].get("s3_key") if generated_images else None)
                 if fallback_image_key:
                     image_url = self.storage_service.generate_presigned_url(
                         fallback_image_key,
@@ -3041,6 +3041,7 @@ class VideoGenerationOrchestrator:
             db: Optional database session to pass to agents (agents will query database themselves)
         """
         from app.agents.agent_2 import agent_2_process
+        from app.agents.agent_3 import agent_3_process
         from app.agents.agent_4 import agent_4_process
         from app.agents.agent_5 import agent_5_process
         
@@ -3128,10 +3129,10 @@ class VideoGenerationOrchestrator:
             # Send orchestrator processing status
             await self._send_orchestrator_status(
                 userId, sessionId, "processing",
-                {"message": "Orchestrator triggering Agent2 and Agent4 in parallel"}
+                {"message": "Orchestrator triggering Agent2, Agent3, and Agent4 in parallel"}
             )
-            
-            # Trigger Agent2 and Agent4 in parallel
+
+            # Trigger Agent2, Agent3, and Agent4 in parallel
             # Agents will query the database themselves for video_session_data
             agent2_task = agent_2_process(
                 websocket_manager=None,  # Not used - using callback instead
@@ -3145,7 +3146,18 @@ class VideoGenerationOrchestrator:
                 db=db,  # Pass db so Agent2 can query if needed
                 status_callback=status_callback
             )
-            
+
+            # Agent3 will query database itself for video_session_data
+            agent3_task = agent_3_process(
+                websocket_manager=None,  # Not used - using callback instead
+                user_id=userId,
+                session_id=sessionId,
+                storage_service=self.storage_service,
+                video_session_data=None,  # Agent3 will query database itself
+                db=db,  # Pass db so Agent3 can query if needed
+                status_callback=status_callback
+            )
+
             # Agent4 will query database itself for video_session_data
             agent4_task = agent_4_process(
                 websocket_manager=None,  # Not used - using callback instead
@@ -3160,23 +3172,69 @@ class VideoGenerationOrchestrator:
                 db=db,  # Pass db so Agent4 can query if needed
                 status_callback=status_callback
             )
-            
-            # Run both agents in parallel
+
+            # Run all three agents in parallel
             try:
-                agent2_result, agent4_result = await asyncio.gather(agent2_task, agent4_task)
-                logger.info(f"Agent2 and Agent4 completed successfully for session {sessionId}")
+                agent2_result, agent3_result, agent4_result = await asyncio.gather(agent2_task, agent3_task, agent4_task)
+                logger.info(f"Agent2, Agent3, and Agent4 completed successfully for session {sessionId}")
             except Exception as e:
-                logger.error(f"Agent2 or Agent4 failed: {e}")
+                logger.error(f"One or more agents (Agent2, Agent3, Agent4) failed: {e}")
                 await self._send_orchestrator_status(
                     userId, sessionId, "error",
                     {"error": str(e), "reason": f"Agent execution failed: {type(e).__name__}"}
                 )
                 raise
-            
-            # After Agent2+Agent4 complete successfully, trigger Agent5 synchronously
+
+            # Initialize Visual Consistency Manager after Agent3 completes
             await self._send_orchestrator_status(
                 userId, sessionId, "processing",
-                {"message": "Agent2 and Agent4 completed, starting Agent5"}
+                {"message": "Initializing visual consistency from Agent3 diagram"}
+            )
+
+            try:
+                from app.agents.visual_consistency_manager import VisualConsistencyManager
+                from app.config import get_settings
+
+                settings = get_settings()
+
+                # Get OpenRouter API key for vision analysis
+                openrouter_api_key = None
+                if settings.USE_AWS_SECRETS:
+                    try:
+                        from app.services.secrets import get_secret
+                        openrouter_api_key = get_secret("pipeline/openrouter-api-key")
+                    except:
+                        pass
+                if not openrouter_api_key:
+                    openrouter_api_key = settings.OPENROUTER_API_KEY
+
+                # Initialize consistency manager
+                consistency_manager = VisualConsistencyManager(openrouter_api_key=openrouter_api_key)
+
+                # Extract style from Agent3's diagram if available
+                if agent3_result and agent3_result.get("diagram_url"):
+                    diagram_url = agent3_result["diagram_url"]
+                    logger.info(f"Extracting visual style from Agent3 diagram: {diagram_url}")
+                    await consistency_manager.extract_style_from_diagram(diagram_url)
+
+                # Save consistency state to S3 for Agent5 to use
+                consistency_state = consistency_manager.get_state()
+                consistency_s3_key = f"users/{userId}/{sessionId}/visual_consistency_state.json"
+                self.storage_service.upload_file_direct(
+                    json.dumps(consistency_state, indent=2).encode('utf-8'),
+                    consistency_s3_key,
+                    content_type='application/json'
+                )
+                logger.info(f"Saved visual consistency state to S3: {consistency_s3_key}")
+
+            except Exception as e:
+                logger.warning(f"Failed to initialize visual consistency manager: {e}")
+                # Continue anyway - consistency is nice to have but not critical
+
+            # After Agent2+Agent3+Agent4 complete successfully, trigger Agent5 synchronously
+            await self._send_orchestrator_status(
+                userId, sessionId, "processing",
+                {"message": "Agent2, Agent3, and Agent4 completed, starting Agent5"}
             )
 
             # Load agent_4_output.json from S3 which contains both agent_2_data and agent_4_data
@@ -3218,6 +3276,7 @@ class VideoGenerationOrchestrator:
                         "message": "Full Test process completed successfully",
                         "videoUrl": video_url,
                         "agent2Result": agent2_result,
+                        "agent3Result": agent3_result,
                         "agent4Result": agent4_result,
                         "agent5Result": agent5_result
                     }

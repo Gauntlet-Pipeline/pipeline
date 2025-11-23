@@ -1357,6 +1357,74 @@ async def test_agent4_audio(request: Agent4TestRequest) -> AgentTestResponse:
 
 
 # =============================================================================
+# Agent 3 Direct Test Endpoint (Educational Diagram Generator)
+# =============================================================================
+
+class Agent3TestRequest(BaseModel):
+    """Request model for testing Agent 3 (Educational Diagram Generator) directly."""
+    session_id: str
+    topic: str
+    learning_objective: Optional[str] = None
+    child_age: Optional[str] = None
+    child_interest: Optional[str] = None
+    confirmed_facts: Optional[List[Dict[str, Any]]] = None
+
+
+@app.post("/api/agent3/test", response_model=AgentTestResponse)
+async def test_agent3_diagram(request: Agent3TestRequest) -> AgentTestResponse:
+    """
+    Test Agent 3 (Educational Diagram Generator) directly with custom input.
+
+    This endpoint allows direct testing of the diagram generation functionality
+    without going through the full pipeline.
+    """
+    start_time = time.time()
+
+    try:
+        # Import the diagram generation function
+        from app.agents.agent_3 import generate_educational_diagram
+
+        # Generate diagram
+        diagram_url = await generate_educational_diagram(
+            topic=request.topic,
+            confirmed_facts=request.confirmed_facts,
+            learning_objective=request.learning_objective,
+            child_age=request.child_age,
+            child_interest=request.child_interest,
+            storage_service=storage_service,
+            user_id="test_user",
+            session_id=request.session_id
+        )
+
+        duration = time.time() - start_time
+
+        return AgentTestResponse(
+            success=True,
+            data={
+                "diagram_url": diagram_url,
+                "topic": request.topic,
+                "learning_objective": request.learning_objective,
+                "child_age": request.child_age,
+                "child_interest": request.child_interest
+            },
+            cost=0.0,  # Cost tracking can be added if needed
+            duration=duration,
+            error=None
+        )
+
+    except Exception as e:
+        import traceback
+        logger.error(f"Agent 3 test failed: {e}\n{traceback.format_exc()}")
+        return AgentTestResponse(
+            success=False,
+            data={},
+            cost=0.0,
+            duration=time.time() - start_time,
+            error=str(e)
+        )
+
+
+# =============================================================================
 # Agent 5 Direct Test Endpoint (Video Generator)
 # =============================================================================
 

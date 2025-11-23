@@ -1049,13 +1049,13 @@ async def hardcode_upload(
                 # Upload diagram if provided
                 if diagram_content:
                     try:
-                        diagram_s3_key = storage_service.get_session_path(user_id, session_id, "images", "diagram.png")
+                        diagramS3 = storage_service.get_session_path(user_id, session_id, "images", "diagram.png")
                         storage_service.upload_file_direct(
                             diagram_content,
-                            diagram_s3_key,
+                            diagramS3,
                             content_type="image/png"
                         )
-                        logger.info(f"[Background] Uploaded diagram to {diagram_s3_key}")
+                        logger.info(f"[Background] Uploaded diagram to {diagramS3}")
                     except Exception as diagram_error:
                         logger.warning(f"[Background] Failed to upload diagram: {diagram_error}, continuing without it")
                 
@@ -1455,10 +1455,10 @@ async def generate_story_images(
                         # Copy diagram to the images directory
                         try:
                             diagram_bytes = storage_service.read_file(request.diagram_s3_path)
-                            diagram_s3_key = f"{output_s3_prefix}diagram.png"
+                            diagramS3 = f"{output_s3_prefix}diagram.png"
                             storage_service.upload_file_direct(
                                 diagram_bytes,
-                                diagram_s3_key,
+                                diagramS3,
                                 content_type="image/png"
                             )
                         except Exception as e:
@@ -1942,7 +1942,7 @@ async def compose_hardcode_video(
         # Get S3 paths using StorageService helpers
         output_s3_prefix = storage_service.get_session_prefix(current_user.id, session_id, "images")
         segments_s3_key = storage_service.get_session_path(current_user.id, session_id, "images", "segments.md")
-        diagram_s3_key = storage_service.get_session_path(current_user.id, session_id, "images", "diagram.png")
+        diagramS3 = storage_service.get_session_path(current_user.id, session_id, "images", "diagram.png")
 
         # Check if segments.md exists
         if not storage_service.file_exists(segments_s3_key):
@@ -2182,7 +2182,7 @@ async def compose_hardcode_video(
                     user_id=current_user.id,
                     image_result=image_result,
                     audio_files=audio_files_list,
-                    diagram_s3_key=diagram_s3_key,
+                    diagramS3=diagramS3,
                     segments=segments,
                     output_s3_prefix=output_s3_prefix,
                     template_title=template_title

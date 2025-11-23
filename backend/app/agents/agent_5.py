@@ -1097,7 +1097,6 @@ async def agent_5_process(
 
             # Download and verify all clips with retry logic
             MAX_CLIP_RETRIES = 2
-            COST_PER_CLIP = 0.09  # ~$0.035/6s for Minimax + padding
             clip_paths = []
 
             async with httpx.AsyncClient(timeout=120.0) as client:
