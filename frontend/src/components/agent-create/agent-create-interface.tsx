@@ -40,10 +40,6 @@ import { Paperclip } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 type AgentCreateInterfaceProps = {
-  /**
-   * Optional sessionId to load on mount.
-   * If provided, the component will load the session data.
-   */
   sessionId?: string | null;
 };
 
