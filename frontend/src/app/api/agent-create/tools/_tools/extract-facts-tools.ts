@@ -27,26 +27,38 @@ export const extractFactsTool: Tool = {
     sessionId?: string;
   }) => {
     try {
-      // If sessionId provided, optionally load existing extractedFacts for context
-      // (not for replacement, just for reference)
+      let materialText = content; // Keep user's original message content
+      let pdfUrl: string | undefined;
+
+      // If sessionId provided, try to load PDF URL and fallback text
       if (sessionId) {
         try {
           const [session] = await db
             .select({
-              extractedFacts: videoSessions.extractedFacts,
+              sourceMaterials: videoSessions.sourceMaterials,
             })
             .from(videoSessions)
             .where(eq(videoSessions.id, sessionId))
             .limit(1);
 
-          // Could use existing facts for context if needed in the future
-          // For now, we just ensure the session exists
-          if (session) {
-            // Session exists, continue with extraction
+          if (session?.sourceMaterials) {
+            const materials = session.sourceMaterials as {
+              text?: string;
+              pdfUrl?: string;
+            };
+
+            // Extract PDF URL if available
+            pdfUrl = materials.pdfUrl;
+
+            // Only use extracted text as fallback if NO PDF URL is available
+            // This preserves the user's message context when PDF is present
+            if (!pdfUrl && materials.text) {
+              materialText = materials.text;
+            }
           }
         } catch (error) {
-          console.error("Error loading session for extractFactsTool:", error);
-          // Continue with extraction even if session load fails
+          console.error("Error loading source materials:", error);
+          // Continue with provided content if loading fails
         }
       }
 
@@ -56,7 +68,8 @@ export const extractFactsTool: Tool = {
       const result = await agent.process({
         sessionId: sessionId ?? "",
         data: {
-          content,
+          content: materialText,
+          pdfUrl,
         },
       });
 

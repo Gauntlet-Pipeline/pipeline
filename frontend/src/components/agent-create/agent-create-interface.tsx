@@ -38,12 +38,9 @@ import { useAgentCreateStore } from "@/stores/agent-create-store";
 import { useState } from "react";
 import { Paperclip } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 
 type AgentCreateInterfaceProps = {
-  /**
-   * Optional sessionId to load on mount.
-   * If provided, the component will load the session data.
-   */
   sessionId?: string | null;
 };
 
@@ -70,6 +67,8 @@ export function AgentCreateInterface({
     showFactSelectionPrompt,
     showNarrationReviewPrompt,
     handleSubmitFacts,
+    narrationLocked,
+    handleVerifyNarration,
   } = useAgentCreateStore();
 
   // Only use store data if it matches the expected session
@@ -129,6 +128,29 @@ export function AgentCreateInterface({
     }
   };
 
+  const onVerifyNarration = async () => {
+    await handleVerifyNarration();
+  };
+
+  const handleFileError = (err: {
+    code: "max_files" | "max_file_size" | "accept";
+    message: string;
+  }) => {
+    if (err.code === "max_file_size") {
+      toast.error("File too large", {
+        description: "PDF files must be smaller than 10MB.",
+      });
+    } else if (err.code === "accept") {
+      toast.error("Invalid file type", {
+        description: "Please upload a PDF file.",
+      });
+    } else {
+      toast.error("Upload error", {
+        description: err.message,
+      });
+    }
+  };
+
   // Show loading skeleton when:
   // 1. Currently loading a session (isSessionLoading = true)
   // 2. OR we have an externalSessionId that doesn't match the store (about to load)
@@ -185,10 +207,12 @@ export function AgentCreateInterface({
                           sessionStatus={sessionStatus}
                           selectedFactsCount={selectedFacts.length}
                           onSubmitVideo={onSubmitVideo}
+                          onVerifyNarration={onVerifyNarration}
                           isGeneratingVideo={isGeneratingVideo}
                           videoSuccess={videoSuccess}
                           videoError={videoError}
                           isLoading={isLoading}
+                          narrationLocked={narrationLocked}
                         />
                       )}
                       {isGeneratingVideo && (
@@ -214,6 +238,8 @@ export function AgentCreateInterface({
                 onSubmit={handleSubmit}
                 accept=".pdf,application/pdf"
                 syncHiddenInput={true}
+                maxFileSize={10 * 1024 * 1024}
+                onError={handleFileError}
               >
                 <PromptInputBody>
                   <PromptInputAttachments>

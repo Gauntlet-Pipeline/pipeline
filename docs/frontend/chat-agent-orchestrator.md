@@ -1,1025 +1,913 @@
-# Chat-Agent Orchestrator Architecture Documentation
+# Agent Create Chat System - Architecture Documentation
 
 ## Overview
 
-This document describes the **AI-driven Orchestrator Agent** architecture that uses **tool calling** and **streaming structured output** to coordinate specialized sub-agents for the educational video creation workflow. Unlike the previous deterministic step-based routing, this architecture uses an intelligent orchestrator that:
+The Agent Create chat system provides an AI-powered workflow for creating personalized educational videos. It uses **tool-based AI** to orchestrate a multi-step process: gathering student information, extracting facts from learning materials, and generating personalized narration scripts.
 
-1. **Decides which tools to call** based on context and user intent
-2. **Streams both chat messages and structured documents** simultaneously using `streamObject()`
-3. **Provides real-time updates** to both the chat panel and main content area
-4. **Maintains clean separation** between conversational text and structured data
+**Key Characteristics:**
 
-The orchestrator provides concise, conversational responses while seamlessly producing structured outputs (facts, scripts, images) that appear in real-time in the main panel.
+- Tool-calling AI with `streamText()` from Vercel AI SDK
+- Three specialized tools wrapping dedicated agent classes
+- JSON-based responses (not streaming objects)
+- Session-based state persistence
+- Zustand store for client-side state management
 
 ## Architecture Principles
 
-### 1. **AI-Driven Orchestration**
+### 1. **Tool-Based AI Pattern**
 
-- **Orchestrator Agent**: An AI agent that uses tool calling to coordinate workflow
-- **Sub-Agents as Tools**: Each workflow step (facts, narration, images) is a tool the orchestrator can call
-- **Intelligent Routing**: The orchestrator decides which tool to use based on conversation context
-- **Unified Response**: All tools return structured outputs that the orchestrator formats for the user
+The system uses AI SDK's tool calling where the LLM decides which tools to invoke based on conversation context:
+
+- **AI decides** which tool(s) to call
+- **Tools wrap agents** that perform specialized tasks
+- **Tools return JSON** with results and user-facing messages
+- **Flexible flow** - not locked into rigid step sequences
 
 ### 2. **Separation of Concerns**
 
-- **Chat Panel (Left)**: Displays only text conversation between user and AI assistant
-- **Main Content Area (Right)**: Displays structured documents (facts, scripts, images) for each workflow step
-- **Database**: Stores both conversation history and structured documents separately
+- **Frontend (Zustand)**: UI state, workflow steps, user interactions
+- **Backend (Tools)**: AI decision-making, fact extraction, script generation
+- **Database**: Session persistence, conversation history, structured data
+- **Agents**: Specialized AI processing (facts, narration)
 
-### 3. **Tool-Based Agent Pattern**
+### 3. **Session-Based Persistence**
 
-Each sub-agent is implemented as a **tool** that:
-
-- Receives structured input (PDF content, confirmed facts, script, etc.)
-- Processes using AI with structured outputs (Zod schemas)
-- Returns structured data + conversational message
-- Can be called independently or in sequence by the orchestrator
-
-### 4. **Dual Streaming Architecture**
-
-The orchestrator uses `streamObject()` to stream both parts simultaneously:
-
-- **Chat Message Stream**: Concise, conversational text updates in real-time
-- **Document Object Stream**: Structured data (facts/script/images) updates incrementally
-- **Single Response**: Both streams sent together in one data stream response
-- **Real-time UX**: Users see progress as data is generated, not just at completion
+- Each conversation has a unique `sessionId`
+- Sessions store: messages, facts, student info, generated scripts
+- Sessions enable resumption and history viewing
+- URL-based session routing for deep linking
 
 ## Architecture Diagram
 
 ```mermaid
 graph TB
-    User[User Input] --> ChatRoute[POST /api/chat]
-    ChatRoute --> SessionCheck{Session Exists?}
-    SessionCheck -->|No| CreateSession[Create New Session]
-    SessionCheck -->|Yes| LoadHistory[Load Conversation History]
-    CreateSession --> OrchestratorAgent[Orchestrator Agent - AI]
-    LoadHistory --> OrchestratorAgent
+    User[User Input] --> Interface[AgentCreateInterface]
+    Interface --> Store[Zustand Store]
+    Store --> API[POST /api/agent-create/tools]
 
-    OrchestratorAgent --> Decision{Need Tool?}
+    API --> Auth{Authenticated?}
+    Auth -->|No| Reject[401 Unauthorized]
+    Auth -->|Yes| Session[Get/Create Session]
 
-    Decision -->|No| StreamText[streamText - Conversational Only]
-    Decision -->|Yes| StreamObject[streamObject - Message + Document]
+    Session --> LoadDB[Load Conversation History]
+    LoadDB --> AI[AI - streamText]
 
-    StreamText --> ChatOnly[Chat Panel - Text Stream]
+    AI --> Decision{Which Tool?}
 
-    StreamObject --> ToolCall{Which Tool?}
-    ToolCall -->|extract_facts| ExtractContent[Extract PDF/URL Content]
-    ExtractContent --> FactTool[FactExtractionAgent Tool]
-    ToolCall -->|generate_script| ScriptTool[ScriptGenerationAgent Tool]
-    ToolCall -->|select_images| ImageTool[ImageSelectionAgent Tool]
+    Decision -->|Student Info| SaveTool[saveStudentInfoTool]
+    Decision -->|Learning Materials| ExtractTool[extractFactsTool]
+    Decision -->|Facts Confirmed| NarrationTool[generateNarrationTool]
+    Decision -->|Just Chat| TextResponse[Text Response Only]
 
-    FactTool --> StreamObject
-    ScriptTool --> StreamObject
-    ImageTool --> StreamObject
+    SaveTool --> SaveDB[(Save to DB)]
+    ExtractTool --> FactAgent[FactExtractionAgent]
+    NarrationTool --> NarrAgent[NarrativeBuilderAgent]
 
-    StreamObject --> DualStream[Dual Stream Response]
-    DualStream --> SaveDB[Save to Database]
-    DualStream --> ChatPanel[Chat Panel - Text Stream]
-    DualStream --> MainPanel[Main Panel - Object Stream]
+    FactAgent --> ExtractResult[Extract Facts via GPT-4o-mini]
+    NarrAgent --> GenResult[Generate Script via GPT-4o-mini]
 
-    style OrchestratorAgent fill:#e1f5ff
-    style ChatPanel fill:#e1f5ff
-    style MainPanel fill:#fff4e1
-    style StreamObject fill:#e8f5e9
-    style DualStream fill:#e8f5e9
-    style FactTool fill:#fce4ec
-    style ScriptTool fill:#fce4ec
-    style ImageTool fill:#fce4ec
+    ExtractResult --> ExtractDB[(Save to extractedFacts)]
+    GenResult --> NarDB[(Save to generatedScript)]
+
+    SaveDB --> JSON[JSON Response]
+    ExtractDB --> JSON
+    NarDB --> JSON
+    TextResponse --> JSON
+
+    JSON --> Store
+    Store --> Interface
+
+    style AI fill:#e1f5ff
+    style Store fill:#fff4e1
+    style SaveTool fill:#fce4ec
+    style ExtractTool fill:#fce4ec
+    style NarrationTool fill:#fce4ec
+    style FactAgent fill:#e8f5e9
+    style NarrAgent fill:#e8f5e9
 ```
 
 ## Database Schema
 
-### Conversation Messages Table
+### Video Sessions Table
 
-Stores **text-only** conversation history:
-
-```sql
-CREATE TABLE video_conversation_message (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES video_session(id) ON DELETE CASCADE,
-  role VARCHAR(20) NOT NULL, -- 'user' | 'assistant' | 'system'
-  content TEXT NOT NULL, -- Text content only
-  parts JSONB, -- UIMessage parts structure (for file attachments)
-  metadata JSONB, -- References to structured data, workflow step
-  created_at TIMESTAMP DEFAULT NOW()
-);
-```
-
-**Key Points:**
-
-- Stores only text conversation
-- `metadata` contains references to structured data (not the data itself)
-- Used for session resumption and chat history display
-
-### Session Table (Updated Schema)
-
-Store **structured documents** with separate columns for extracted and confirmed data:
-
-```sql
--- video_session table
-ALTER TABLE video_session ADD COLUMN current_step VARCHAR(50);
-ALTER TABLE video_session ADD COLUMN workflow_context JSONB;
-
--- Facts storage (separate columns)
-ALTER TABLE video_session ADD COLUMN extracted_facts JSONB; -- All extracted facts (pending review)
-ALTER TABLE video_session ADD COLUMN confirmed_facts JSONB; -- Only confirmed facts (after user approval)
-
--- Script storage
-ALTER TABLE video_session ADD COLUMN generated_script JSONB; -- Generated script (editable by user)
-ALTER TABLE video_session ADD COLUMN edited_script JSONB; -- User-edited version (optional, if different from generated)
-
--- Existing columns
--- topic, learning_objective, status, etc.
-```
-
-**Key Points:**
-
-- **extracted_facts**: All facts extracted from materials (pending user review)
-- **confirmed_facts**: Only facts user has confirmed (used for script generation)
-- **generated_script**: Script generated from confirmed facts (user can edit)
-- **edited_script**: Optional column for tracking user edits (if needed for audit)
-- Structured outputs stored in appropriate columns
-- `workflow_context` tracks current state and step
-
-### Video Assets Table
-
-Stores selected images with S3 paths:
-
-```sql
-CREATE TABLE video_asset (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES video_session(id) ON DELETE CASCADE,
-  asset_type VARCHAR(50) NOT NULL, -- 'image' | 'audio' | 'video'
-  url TEXT, -- S3 URL or external URL
-  s3_key TEXT, -- S3 key path: users/{userID}/{sessionID}/images/selected/{filename}
-  metadata JSONB, -- Image metadata (source, prompt, search query, etc.)
-  created_at TIMESTAMP DEFAULT NOW()
-);
-```
-
-**S3 Path Structure:**
-
-```
-users/{userID}/{sessionID}/images/selected/{filename}
-```
-
-Example: `users/user_123/sess_456/images/selected/image_001.jpg`
-
-## Orchestrator Agent
-
-### Location
-
-`frontend/src/server/workflows/orchestrator-agent.ts`
-
-### Responsibilities
-
-- Uses AI SDK's `tool` function to define sub-agents as callable tools
-- Uses `streamObject()` with tool calling to stream both chat messages and structured documents
-- Decides when to use tools vs. providing conversational responses
-- Extracts PDF/URL content before processing
-- Streams unified response with message (chat) and document (main panel) simultaneously
-- Manages conversation history and structured data persistence
-
-### System Prompt
-
-```typescript
-const orchestratorSystemPrompt = `You are an intelligent orchestrator helping a teacher create educational videos.
-
-Your job is to:
-1. Understand what the teacher needs from their message
-2. Call the appropriate tool(s) to get the work done
-3. Return a unified response with:
-   - message: A conversational response to the teacher
-   - data: The structured data from the tool (if any)
-   - document: The document to display in the main panel (if any)
-   - nextStep: The next workflow step (if applicable)
-
-Available tools:
-- extract_facts: Extract educational facts from learning materials (PDF, URL, or text)
-  Use when: Teacher provides learning materials (PDF, URL, or text content)
-  Returns: Extracted facts (pending review)
-  
-- generate_script: Generate educational video script from confirmed facts
-  Use when: Teacher confirms facts are ready (explicit confirmation or implicit from context)
-  Requires: confirmed_facts must exist in session
-  Returns: Generated script (editable by user)
-  
-- select_images: Fetch and select images for the video script
-  Use when: Script is ready and teacher wants to select images
-  Requires: generated_script must exist in session
-  Returns: Top 6 images from Google Programmable Search Engine for user selection
-
-Current workflow step: {currentStep}
-Current context: {workflowContext}
-
-Be conversational and helpful. Guide the teacher through the workflow naturally.
-Provide concise, short answers in the chat. When you call a tool, the structured output will automatically appear in the main panel.`;
-```
-
-### Tool Definitions
-
-#### 1. extract_facts Tool
-
-```typescript
-extract_facts: tool({
-  description: "Extract educational facts from learning materials (PDF, URL, or text). Returns facts pending user review.",
-  parameters: z.object({
-    userMessage: z.string().describe("Original user message for context"),
-    topic: z.string().optional().describe("Detected or provided topic"),
-  }),
-  execute: async ({ userMessage, topic }) => {
-    // Lazy extraction: Only extract PDF/URL content when this tool is called
-    const extractedContent = await this.extractContent(messages, userMessage);
-    const materials = extractedContent
-      ? `${userMessage}\n\n--- Learning Materials ---\n${extractedContent}`
-      : userMessage;
-
-    const factAgent = new FactExtractionAgent();
-    const result = await factAgent.process({
-      userMessage: materials,
-      conversationHistory: [],
-      sessionId,
-      userId,
-      context: { step: "fact_extraction", topic },
-    });
-
-    return {
-      facts: result.data?.facts || [],
-      topic: result.data?.topic || topic,
-      learningObjective: result.data?.learningObjective,
-      message: result.conversationResponse,
-    };
-  },
-}),
-```
-
-**Key Points:**
-
-- **Lazy Extraction**: PDF/URL content is extracted only when `extract_facts` is called
-- **No upfront cost**: Other tools don't wait for unnecessary extraction
-- **Tool-specific**: Each tool handles its own data requirements
-
-#### 2. generate_script Tool
-
-```typescript
-generate_script: tool({
-  description: "Generate educational video script from confirmed facts. Script is editable by user after generation.",
-  parameters: z.object({
-    confirmedFacts: z.array(z.object({
-      concept: z.string(),
-      details: z.string(),
-    })).describe("Confirmed facts from fact extraction step"),
-    topic: z.string().optional().describe("Topic for the video"),
-    learningObjective: z.string().optional().describe("Learning objective"),
-  }),
-  execute: async ({ confirmedFacts, topic, learningObjective }) => {
-    const scriptAgent = new ScriptGenerationAgent();
-    const result = await scriptAgent.process({
-      userMessage: `Generate script for topic: ${topic || "educational content"}`,
-      conversationHistory: [],
-      sessionId: "",
-      userId: "",
-      context: {
-        step: "script_generation",
-        confirmedFacts,
-        topic,
-        learningObjective,
-      },
-    });
-
-    return {
-      script: result.data,
-      message: result.conversationResponse,
-    };
-  },
-}),
-```
-
-#### 3. select_images Tool
-
-```typescript
-select_images: tool({
-  description: "Fetch top 6 images from Google Programmable Search Engine based on script content. User will select 1-2 images.",
-  parameters: z.object({
-    script: z.unknown().describe("The generated script to base image search on"),
-    searchQueries: z.array(z.string()).optional().describe("Optional specific search queries for images"),
-  }),
-  execute: async ({ script, searchQueries }) => {
-    const imageAgent = new ImageSelectionAgent();
-    const result = await imageAgent.process({
-      userMessage: "Fetch images for this script",
-      conversationHistory: [],
-      sessionId: "",
-      userId: "",
-      context: {
-        step: "image_selection",
-        generatedScript: script,
-      },
-    });
-
-    return {
-      images: result.data?.images || [],
-      message: result.conversationResponse,
-    };
-  },
-}),
-```
-
-### Unified Response Schema
-
-The orchestrator uses **streaming structured output** via `streamObject()` to stream both chat messages and structured documents in real-time:
-
-```typescript
-const OrchestratorResponseSchema = z.object({
-  message: z
-    .string()
-    .describe("Conversational response to user - displayed ONLY in chat panel"),
-  data: z
-    .unknown()
-    .optional()
-    .describe(
-      "Structured data for database storage (facts, script, images) - NOT displayed in UI"
-    ),
-  document: z
-    .unknown()
-    .optional()
-    .describe(
-      "Document object for main panel display (editable facts, script, images) - displayed ONLY in main panel"
-    ),
-  nextStep: z
-    .enum([
-      "fact_extraction",
-      "script_generation",
-      "image_selection",
-      "completed",
-    ])
-    .optional()
-    .describe("Next workflow step"),
-});
-```
-
-**Key Separation:**
-
-- **`message`**: Pure text for chat panel - no JSON, no structured data
-- **`data`**: Structured data for database persistence - not sent to frontend
-- **`document`**: Formatted document for main panel - contains UI-ready structure
-- **`nextStep`**: Workflow state management
-
-**Example Response:**
-
-When `extract_facts` tool is called:
+Stores session state and structured data:
 
 ```typescript
 {
-  message: "I've extracted 12 educational facts from your materials. Please review them in the main panel.",
-  data: {
-    facts: [...],  // Raw facts for database
-    topic: "Photosynthesis",
-    learningObjective: "Understand the process of photosynthesis"
-  },
-  document: {
-    type: "facts",
-    facts: [...],  // Same facts, but formatted for UI display
-    editable: true
-  },
-  nextStep: "fact_extraction"
-}
-```
-
-The chat route then:
-
-1. **Streams `message`** to chat panel (text stream) - real-time updates
-2. **Streams `document`** to main panel (object stream) - real-time updates
-3. **Saves `data`** to database (`extracted_facts` column) - persisted for session resumption
-
-## Sub-Agents (Tools)
-
-### 1. FactExtractionAgent
-
-**Location**: `frontend/src/server/workflows/agents/fact-extraction-agent.ts`
-
-**Input**:
-
-- Learning materials (PDF text, URL content, or direct text)
-- User message for context
-
-**Process**:
-
-1. Uses `generateObject` with `FactExtractionOutputSchema`
-2. Extracts 5-15 educational facts
-3. Detects topic and learning objective
-
-**Output Schema**:
-
-```typescript
-const FactExtractionOutputSchema = z.object({
-  facts: z.array(FactSchema).min(5).max(15),
-  topic: z.string().optional(),
-  learningObjective: z.string().optional(),
-});
-```
-
-**Storage**:
-
-- **extracted_facts**: All extracted facts saved to `video_sessions.extracted_facts`
-- **confirmed_facts**: Only saved when user explicitly confirms (moved from `extracted_facts`)
-
-**UI**:
-
-- **Chat**: "I've extracted X facts from your materials. Please review them in the main panel."
-- **Main Panel**: Displays `FactExtractionPanel` with editable facts cards
-
-### 2. ScriptGenerationAgent
-
-**Location**: `frontend/src/server/workflows/agents/script-generation-agent.ts`
-
-**Input**:
-
-- **confirmed_facts**: Only confirmed facts from database (not extracted_facts)
-- Topic and learning objective
-
-**Process**:
-
-1. Loads `confirmed_facts` from `video_sessions.confirmed_facts`
-2. Uses `generateObject` with `ScriptOutputSchema`
-3. Generates 4-part educational script (Introduction, Main Content, Examples, Conclusion)
-
-**Output Schema**:
-
-```typescript
-const ScriptOutputSchema = z.object({
-  segments: z.array(
-    z.object({
-      segmentNumber: z.number(),
-      segmentType: z.enum([
-        "introduction",
-        "main_content",
-        "examples",
-        "conclusion",
-      ]),
-      startTime: z.number(),
-      endTime: z.number(),
-      narration: z.string(),
-      visualGuidance: z.string(),
-      keyConcepts: z.array(z.string()),
-    })
-  ),
-  totalDuration: z.number(),
-});
-```
-
-**Storage**:
-
-- **generated_script**: Saved to `video_sessions.generated_script` after generation
-- **edited_script**: Optional column for tracking user edits (if user modifies the script)
-
-**User Editing**:
-
-- User can edit narration and visual guidance in `ScriptReviewPanel`
-- Edits are saved back to `generated_script` (overwrites original)
-- No separate `edited_script` column needed unless audit trail is required
-
-**UI**:
-
-- **Chat**: "I've generated your script based on the confirmed facts. You can review and edit it in the main panel."
-- **Main Panel**: Displays `ScriptReviewPanel` with editable script segments
-
-### 3. ImageSelectionAgent
-
-**Location**: `frontend/src/server/workflows/agents/image-selection-agent.ts`
-
-**Input**:
-
-- Generated script (for generating search queries)
-- Optional: Specific search queries
-
-**Process**:
-
-1. Generates search queries from script segments
-2. Fetches top 6 images from **Google Programmable Search Engine** API
-3. Returns image URLs and metadata for user selection
-
-**Google Programmable Search Engine Integration**:
-
-```typescript
-async function fetchImagesFromGoogle(
-  searchQuery: string,
-  apiKey: string,
-  searchEngineId: string,
-  numResults: number = 6
-): Promise<
-  Array<{
-    url: string;
-    title: string;
-    thumbnail: string;
-    source: string;
-  }>
-> {
-  const response = await fetch(
-    `https://www.googleapis.com/customsearch/v1?` +
-      `key=${apiKey}&` +
-      `cx=${searchEngineId}&` +
-      `q=${encodeURIComponent(searchQuery)}&` +
-      `searchType=image&` +
-      `num=${numResults}&` +
-      `safe=active&` +
-      `imgSize=large&` +
-      `imgType=photo`
-  );
-
-  const data = await response.json();
-  return (
-    data.items?.map((item: any) => ({
-      url: item.link,
-      title: item.title,
-      thumbnail: item.image?.thumbnailLink,
-      source: item.displayLink,
-    })) || []
-  );
-}
-```
-
-**Output Schema**:
-
-```typescript
-const ImageSelectionOutputSchema = z.object({
-  availableImages: z
-    .array(
-      z.object({
-        id: z.string(),
-        url: z.string(),
-        thumbnail: z.string(),
-        title: z.string(),
-        source: z.string(),
-        searchQuery: z.string(),
-      })
-    )
-    .length(6)
-    .describe("Top 6 images from Google search"),
-  message: z.string().describe("Message to user about image selection"),
-});
-```
-
-**Storage**:
-
-- Selected images are uploaded to S3 at: `users/{userID}/{sessionID}/images/selected/{filename}`
-- Metadata saved to `video_assets` table:
-  - `asset_type`: "image"
-  - `url`: S3 URL
-  - `s3_key`: Full S3 key path
-  - `metadata`: { source, searchQuery, originalUrl, etc. }
-
-**S3 Upload Process**:
-
-```typescript
-async function uploadSelectedImage(
-  imageUrl: string,
-  userId: string,
-  sessionId: string,
-  filename: string
-): Promise<{ s3Key: string; s3Url: string }> {
-  // 1. Fetch image from Google search result
-  const imageResponse = await fetch(imageUrl);
-  const imageBuffer = await imageResponse.arrayBuffer();
-
-  // 2. Upload to S3
-  const s3Key = `users/${userId}/${sessionId}/images/selected/${filename}`;
-  await s3Client.putObject({
-    Bucket: process.env.S3_BUCKET_NAME,
-    Key: s3Key,
-    Body: Buffer.from(imageBuffer),
-    ContentType: "image/jpeg",
-  });
-
-  // 3. Generate presigned URL
-  const s3Url = await getPresignedUrl(s3Key);
-
-  return { s3Key, s3Url };
-}
-```
-
-**UI**:
-
-- **Chat**: "I've found 6 images based on your script. Please select 1-2 images in the main panel."
-- **Main Panel**: Displays `ImageSelectionPanel` with image grid (6 images) and selection interface
-
-## Data Flow
-
-### 1. User Submits Learning Materials
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant ChatRoute
-    participant OrchestratorAgent
-    participant ExtractPDF
-    participant FactTool
-    participant DB
-
-    User->>ChatRoute: Upload PDF + message
-    ChatRoute->>OrchestratorAgent: Process message
-    OrchestratorAgent->>OrchestratorAgent: AI decides: call extract_facts
-    OrchestratorAgent->>OrchestratorAgent: streamObject() with tools
-    OrchestratorAgent->>FactTool: extract_facts(userMessage, messages)
-    FactTool->>FactTool: Extract PDF/URL content (lazy extraction)
-    FactTool->>ExtractPDF: Extract PDF text
-    ExtractPDF-->>FactTool: PDF text content
-    FactTool->>FactTool: generateObject with FactSchema
-    FactTool-->>OrchestratorAgent: { facts, topic, message }
-    OrchestratorAgent->>DB: Save to extracted_facts (async)
-    OrchestratorAgent-->>ChatRoute: Stream (textStream + objectStream)
-    ChatRoute-->>User: Stream chat message + document simultaneously
-```
-
-### 2. User Confirms Facts
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant ChatRoute
-    participant OrchestratorAgent
-    participant ScriptTool
-    participant DB
-
-    User->>ChatRoute: "These facts look good"
-    ChatRoute->>OrchestratorAgent: Process message
-    OrchestratorAgent->>DB: Load extracted_facts
-    OrchestratorAgent->>DB: Move to confirmed_facts
-    OrchestratorAgent->>OrchestratorAgent: AI decides: call generate_script
-    OrchestratorAgent->>OrchestratorAgent: streamObject() with tools
-    OrchestratorAgent->>ScriptTool: generate_script(confirmedFacts)
-    ScriptTool->>ScriptTool: generateObject with ScriptSchema
-    ScriptTool-->>OrchestratorAgent: { script, message }
-    OrchestratorAgent->>DB: Save to generated_script (async)
-    OrchestratorAgent-->>ChatRoute: Stream (textStream + objectStream)
-    ChatRoute-->>User: Stream chat message + script document simultaneously
-```
-
-### 3. User Selects Images
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant ChatRoute
-    participant OrchestratorAgent
-    participant ImageTool
-    participant GoogleSearch
-    participant S3
-    participant DB
-
-    User->>ChatRoute: "Let's select images"
-    ChatRoute->>OrchestratorAgent: Process message
-    OrchestratorAgent->>DB: Load generated_script
-    OrchestratorAgent->>OrchestratorAgent: AI decides: call select_images
-    OrchestratorAgent->>OrchestratorAgent: streamObject() with tools
-    OrchestratorAgent->>ImageTool: select_images(script)
-    ImageTool->>ImageTool: Generate search queries from script
-    ImageTool->>GoogleSearch: Search for images (6 queries)
-    GoogleSearch-->>ImageTool: Top 6 images
-    ImageTool-->>OrchestratorAgent: { images, message }
-    OrchestratorAgent-->>ChatRoute: Stream (textStream + objectStream)
-    ChatRoute-->>User: Stream chat message + images document simultaneously
-
-    User->>ChatRoute: Select 1-2 images
-    ChatRoute->>S3: Upload selected images
-    S3-->>ChatRoute: S3 URLs
-    ChatRoute->>DB: Save to video_assets
-    ChatRoute-->>User: Confirmation
-```
-
-## Implementation Details
-
-### Orchestrator Agent Process Method
-
-The orchestrator uses `streamObject()` to stream both chat messages and structured documents in real-time:
-
-```typescript
-async process(
-  sessionId: string,
-  userId: string,
-  userMessage: string,
-  messages: UIMessage[],
-): Promise<StreamableValue<OrchestratorResponse>> {
-  // 1. Load current session state
-  const session = await this.loadSession(sessionId);
-
-  // 2. Build system prompt with context
-  const systemPrompt = this.buildSystemPrompt(session);
-
-  // 3. Get tools with proper session context
-  // Note: Tools handle their own content extraction (extract_facts extracts PDF/URL)
-  const tools = this.getTools(sessionId, userId);
-
-  // 4. Use streamObject to stream both message and document
-  // This streams the structured output in real-time, allowing both
-  // the chat message and document to update as they're generated
-  // Content extraction happens inside the extract_facts tool when it's called
-  const result = await streamObject({
-    model: openai("gpt-4o-mini"),
-    schema: OrchestratorResponseSchema,
-    system: systemPrompt,
-    tools: tools,
-    messages: [
-      ...convertToModelMessages(messages),
-      {
-        role: "user",
-        content: userMessage,
-      },
-    ],
-  });
-
-  // 5. Process the stream to save data to database
-  // The stream provides incremental updates, but we also save the final result
-  const streamWithSaving = pipeDataStreamValues(result.objectStream, async (value) => {
-    // Save structured data incrementally or on final value
-    if (value && typeof value === 'object' && 'data' in value) {
-      await this.saveStructuredData(sessionId, value.data, value);
-    }
-    return value;
-  });
-
-  // 6. Return streamable value
-  // Frontend receives both textStream (chat) and objectStream (document)
-  return streamWithSaving;
+  id: string;                      // Primary key (nanoid)
+  userId: string;                  // Foreign key to users
+  status: string;                  // 'created' | 'facts_extracted' | 'script_generated' | etc.
+  topic: string | null;            // Main topic (e.g., "American Revolution")
+  childAge: string | null;         // Student age (e.g., "10")
+  childInterest: string | null;    // Student interest (e.g., "soccer")
+  learningObjective: string | null; // Learning goal
+  extractedFacts: Fact[] | null;   // All extracted facts (pending review)
+  confirmedFacts: Fact[] | null;   // User-selected facts
+  generatedScript: Narration | null; // Generated script with segments
+  createdAt: Date;
+  updatedAt: Date;
 }
 ```
 
 **Key Points:**
 
-- **`streamObject()`**: Streams structured data incrementally as it's generated
-- **Real-time Updates**: Both chat message and document update in real-time
-- **Dual Stream**: `result.textStream` for chat, `result.objectStream` for document
-- **Database Saving**: Can save incrementally or wait for final value
+- `extractedFacts`: Facts from AI extraction (user can review/select)
+- `confirmedFacts`: User-approved subset used for narration
+- `generatedScript`: Final narration with segments, timing, visuals
+- `childAge` + `childInterest`: Used for personalization
 
-### Chat Route Handling
+### Conversation Messages Table
 
-The chat route receives a streamable value and streams both chat message and document:
-
-```typescript
-// In POST /api/chat route.ts
-const orchestratorStream = await orchestratorAgent.process(
-  sessionId,
-  session.user.id,
-  userContent,
-  messages
-);
-
-// Stream both chat message and document together
-// streamObject() provides both textStream and objectStream
-// We use toDataStreamResponse() to send both parts in one response
-return toDataStreamResponse({
-  objectStream: orchestratorStream,
-  // The text stream is embedded in the object stream
-  // Frontend can extract both parts from the data stream
-});
-```
-
-**Decision Logic: When to use `streamText` vs `streamObject`:**
-
-The orchestrator agent decides internally whether to call tools. The route always calls the orchestrator, which:
-
-1. **Uses `streamObject()`** when tools are needed (extract facts, generate script, select images)
-
-   - Returns both chat message stream and document object stream
-   - Frontend receives dual stream via `toDataStreamResponse()`
-
-2. **Uses `streamText()` internally** for simple conversational responses (no tools needed)
-   - Returns only chat message stream
-   - Frontend receives text stream via `toUIMessageStreamResponse()`
-
-The orchestrator's AI decides based on:
-
-- User message content and intent
-- Current workflow step and session state
-- Whether files/materials are provided
-- Whether structured output is needed
-
-**Note:** The route doesn't need to decide - the orchestrator handles this intelligently.
-
-**Frontend receives:**
-
-- **Chat**: Streamed text message (from `textStream` in data stream)
-- **Main Panel**: Streamed structured document (from `objectStream` in data stream)
-- **Real-time Updates**: Both parts update incrementally as they're generated
-
-**Frontend Handling:**
+Stores text conversation history:
 
 ```typescript
-// Frontend extracts both streams from the data stream response
-const { objectStream, textStream } = await response.body;
-
-// Process text stream for chat panel
-for await (const chunk of textStream) {
-  updateChatPanel(chunk);
-}
-
-// Process object stream for main panel
-for await (const chunk of objectStream) {
-  updateMainPanel(chunk.document);
+{
+  id: string;                // Primary key
+  sessionId: string;         // Foreign key to video_sessions
+  role: 'user' | 'assistant' | 'system';
+  content: string;           // Text content only
+  parts: UIMessagePart[] | null; // File attachments, etc.
+  metadata: JSON | null;     // Workflow context, references
+  createdAt: Date;
 }
 ```
 
-This ensures:
+**Key Points:**
 
-- Chat never shows JSON or structured data (only text stream)
-- Main panel receives clean, editable documents (only object stream)
-- Real-time updates for both panels as data is generated
-- Database stores raw structured data separately for persistence
+- Stores **text-only** conversation
+- `parts` contains file attachments (PDFs)
+- `metadata` can reference structured data
+- Used for session resumption and display
 
-### Content Extraction
+### Video Assets Table
 
-PDF and URL content extraction is **lazy** - it only happens when the `extract_facts` tool is called, not at the orchestrator level. This is more efficient because:
-
-- **No unnecessary extraction**: Content is only extracted when facts are actually needed
-- **Faster responses**: Other tools (generate_script, select_images) don't wait for extraction
-- **Better separation**: Each tool handles its own data requirements
-
-**Implementation in extract_facts tool:**
+Stores generated/uploaded media:
 
 ```typescript
-extract_facts: tool({
-  // ... tool definition ...
-  execute: async ({ userMessage, topic }) => {
-    // Extract PDF/URL content ONLY when this tool is called
-    const extractedContent = await this.extractContent(messages, userMessage);
+{
+  id: string;
+  sessionId: string;
+  assetType: string; // 'image' | 'audio' | 'video'
+  url: string | null; // S3 URL or external URL
+  metadata: JSON | null; // Asset-specific data
+  createdAt: Date;
+}
+```
 
-    // Combine extracted content with user message
-    const materials = extractedContent
-      ? `${userMessage}\n\n--- Learning Materials ---\n${extractedContent}`
-      : userMessage;
+## API Route: `/api/agent-create/tools`
 
-    // Process with fact extraction agent
-    const result = await this.factAgent.process({
-      userMessage: materials,
-      // ... rest of processing
-    });
+**Location**: `frontend/src/app/api/agent-create/tools/route.ts`
 
-    return { /* ... */ };
-  },
-}),
+### Request Format
 
-// Helper method in orchestrator (only used by extract_facts tool)
-private async extractContent(
-  messages: UIMessage[],
-  userMessage: string,
-): Promise<string> {
-  const lastUserMessage = messages.filter((m) => m.role === "user").pop();
-  const extractedContent: string[] = [];
+```typescript
+POST /api/agent-create/tools
+Content-Type: application/json
 
-  // Extract PDF content
-  if (lastUserMessage?.parts) {
-    const fileParts = lastUserMessage.parts.filter(
-      (part): part is FileUIPart => part.type === "file"
-    );
+{
+  "messages": UIMessage[],      // Conversation history
+  "selectedFacts": Fact[],      // Optional: confirmed facts
+  "sessionId": string | null    // Optional: existing session
+}
+```
 
-    for (const filePart of fileParts) {
-      if (filePart.mediaType === "application/pdf" ||
-          filePart.filename?.toLowerCase().endsWith(".pdf")) {
-        const pdfText = await extractTextFromPDF(filePart.url);
-        extractedContent.push(`--- PDF Content ---\n${pdfText}`);
-      }
-    }
+### Response Format
+
+```typescript
+{
+  // From tool execution
+  "type": "tool-result",
+  "output": string,  // JSON string containing:
+
+  // For extractFactsTool:
+  {
+    "facts": Fact[],
+    "message": string,
+    "topic": string,
+    "learningObjective": string
   }
 
-  // Extract URL content
-  const detectedURLs = detectURLs(userMessage);
-  for (const url of detectedURLs) {
-    const urlText = await extractTextFromURL(url);
-    extractedContent.push(`--- URL Content (${url}) ---\n${urlText}`);
+  // For generateNarrationTool:
+  {
+    "narration": Narration,
+    "message": string
   }
 
-  return extractedContent.join("\n\n");
+  // For saveStudentInfoTool:
+  {
+    "success": boolean,
+    "message": string,
+    "child_age": string,
+    "child_interest": string
+  }
+}
+
+// Headers:
+X-Session-Id: string  // Returned on first message if new session
+```
+
+### System Prompt
+
+The AI is guided by a conversational system prompt:
+
+```typescript
+const systemPrompt = `You are an expert educational AI assistant helping teachers create personalized history videos for individual students.
+
+Your role:
+- Help teachers create engaging history videos tailored to specific students
+- Gather student information (age and interests) when provided to personalize content
+- Extract key facts from lesson materials
+- Generate age-appropriate, personalized narration scripts
+
+Available Tools:
+1. saveStudentInfoTool - Save student age and interest for personalization (OPTIONAL)
+2. extractFactsTool - Extract educational facts from learning materials
+3. generateNarrationTool - Generate a structured narration/script from confirmed facts
+
+Conversation Flow (FLEXIBLE):
+- If the teacher mentions student age or interests, use saveStudentInfoTool
+- When the teacher provides lesson content/materials, ALWAYS use extractFactsTool
+- After facts are selected, use generateNarrationTool
+- Personalization is OPTIONAL but recommended
+
+Key Guidelines:
+- Be warm, conversational, and helpful
+- Gently encourage personalization but don't require it
+- Always extract facts when content is provided
+- Guide the teacher through the process naturally`;
+```
+
+## Tools
+
+### 1. saveStudentInfoTool
+
+**Purpose**: Capture student age and interests for personalization
+
+**Location**: `frontend/src/app/api/agent-create/tools/_tools/save-student-info-tool.ts`
+
+**Input Schema**:
+
+```typescript
+{
+  child_age: string;      // "7", "10", "12 years old"
+  child_interest: string; // "soccer", "Minecraft", "dinosaurs"
+  sessionId?: string;     // Injected by route
 }
 ```
 
-## Benefits
+**Process**:
 
-### 1. **Clean Separation of Concerns**
+1. Validates sessionId exists
+2. Updates session record with `childAge` and `childInterest`
+3. Returns success message
 
-- **Streaming Structured Output**: Orchestrator uses `streamObject()` to stream both chat messages and documents simultaneously
-- **Chat Panel**: Only receives conversational text stream (no JSON, no structured data)
-- **Main Panel**: Receives clean, editable document object stream
-- **Database**: Stores raw structured data separately from UI concerns
-- **Real-time Updates**: Both panels update incrementally as data is generated
+**Output**:
 
-### 2. **Intelligent Decision Making**
+```typescript
+{
+  success: boolean;
+  message: string;
+  child_age: string;
+  child_interest: string;
+}
+```
 
-- AI orchestrator can reason about which tool to use
-- Can handle edge cases and ambiguous user input
-- Can ask clarifying questions before calling tools
+**Database Update**:
 
-### 3. **Flexible Workflow**
+```sql
+UPDATE video_session
+SET child_age = $1, child_interest = $2, updated_at = NOW()
+WHERE id = $sessionId
+```
 
-- Not locked into rigid step-by-step flow
-- Can skip steps if not needed
-- Can combine multiple tools in one turn
+### 2. extractFactsTool
 
-### 4. **Better User Experience**
+**Purpose**: Extract educational facts from learning materials
 
-- More natural conversation flow
-- Orchestrator can provide context-aware responses
-- Can handle corrections and changes mid-workflow
-- Chat stays clean and conversational (no JSON blocks)
-- **Real-time feedback**: Users see updates as they happen, not just at the end
-- **Progressive rendering**: Documents appear incrementally, improving perceived performance
+**Location**: `frontend/src/app/api/agent-create/tools/_tools/extract-facts-tools.ts`
 
-### 5. **Extensibility**
+**Input Schema**:
 
-- Add new tools without changing orchestrator logic
-- Tools are independent and testable
-- Easy to add new workflow steps
+```typescript
+{
+  content: string;    // PDF text, URL content, or direct text
+  sessionId?: string; // Injected by route
+}
+```
 
-### 6. **Type Safety**
+**Process**:
 
-- Zod schemas for all structured outputs
-- TypeScript types generated from schemas
-- Compile-time error checking
-- Structured output ensures type-safe separation
+1. Calls `FactExtractionAgent`
+2. Agent uses GPT-4o-mini with specialized prompt
+3. Extracts 5-15 facts with concept, details, confidence
+4. Detects topic and learning objective
+5. Returns structured JSON
 
-## Trade-offs
+**Output**:
 
-### 1. **Cost**
+```typescript
+{
+  facts: Array<{
+    concept: string; // "American Revolution"
+    details: string; // 2-4 sentence explanation
+    confidence: number; // 0-1 score
+  }>;
+  message: string;
+  topic: string;
+  learningObjective: string;
+}
+```
 
-- Orchestrator makes AI decision (1 LLM call)
-- Each tool may make additional LLM calls
-- More expensive than deterministic routing
+**Database Update** (non-blocking):
 
-### 2. **Latency**
+```sql
+UPDATE video_session
+SET extracted_facts = $facts,
+    topic = $topic,
+    learning_objective = $objective,
+    status = 'facts_extracted',
+    updated_at = NOW()
+WHERE id = $sessionId
+```
 
-- Multiple sequential LLM calls can add delay
-- Tool execution time varies
-- May need to optimize for speed
+### 3. generateNarrationTool
 
-### 3. **Reliability**
+**Purpose**: Generate structured video script from confirmed facts
 
-- AI decisions can be unpredictable
-- May need fallback to deterministic routing
-- Requires good error handling
+**Location**: `frontend/src/app/api/agent-create/tools/_tools/generate-narration-tool.ts`
 
-### 4. **Debugging**
+**Input Schema**:
 
-- More complex to trace execution flow
-- Tool calls may not be obvious
-- Need good logging and monitoring
+```typescript
+{
+  facts: Array<{
+    concept: string;
+    details: string;
+    confidence?: number;
+  }>;
+  topic?: string;
+  target_duration?: number;  // Default: 60 seconds
+  child_age?: string;
+  child_interest?: string;
+  sessionId?: string;        // Injected by route
+}
+```
+
+**Process**:
+
+1. Loads `confirmedFacts`, `topic`, `childAge`, `childInterest` from session if available
+2. Falls back to request parameters
+3. Calls `NarrativeBuilderAgent`
+4. Agent generates 4-segment script:
+   - **Hook** (0-10s): Engaging question or fact
+   - **Concept Introduction** (10-25s): Key vocabulary
+   - **Process Explanation** (25-45s): How/why it works
+   - **Conclusion** (45-60s): Real-world connection
+5. Adjusts language complexity based on `childAge`
+6. Incorporates `childInterest` into examples
+
+**Output**:
+
+```typescript
+{
+  narration: {
+    total_duration: number;
+    reading_level: string;
+    key_terms_count: number;
+    segments: Array<{
+      id: string;
+      type:
+        | "hook"
+        | "concept_introduction"
+        | "process_explanation"
+        | "conclusion";
+      start_time: number;
+      duration: number;
+      narration: string;
+      visual_guidance: string;
+      key_concepts: string[];
+      educational_purpose: string;
+    }>;
+  }
+  message: string;
+}
+```
+
+**Database Update** (non-blocking):
+
+```sql
+UPDATE video_session
+SET generated_script = $narration,
+    status = 'script_generated',
+    updated_at = NOW()
+WHERE id = $sessionId
+```
+
+## Agents
+
+### FactExtractionAgent
+
+**Location**: `frontend/src/server/agents/fact-extraction.ts`
+
+**Technology**: Uses `generateText()` from Vercel AI SDK
+
+**Model**: GPT-4o-mini
+
+**System Prompt Highlights**:
+
+- Extract 5-15 key educational facts
+- Focus on historical concepts, events, figures
+- Ensure clarity, accuracy, age-appropriateness
+- Provide concept + details + confidence score
+- Identify topic and learning objective
+
+**Input**:
+
+```typescript
+{
+  sessionId: string;
+  data: {
+    content: string;
+  }
+}
+```
+
+**Output**:
+
+```typescript
+{
+  success: boolean;
+  data: {
+    facts: Fact[];
+    message: string;
+    topic: string;
+    learningObjective: string;
+  };
+  cost: number;    // Estimated API cost
+  duration: number; // Processing time in seconds
+  error?: string;
+}
+```
+
+### NarrativeBuilderAgent
+
+**Location**: `frontend/src/server/agents/narrative-builder.ts`
+
+**Technology**: Uses `generateText()` from Vercel AI SDK
+
+**Model**: GPT-4o-mini
+
+**System Prompt Features**:
+
+- Age-appropriate language adjustment
+- Interest-based personalization
+- 4-part script structure
+- Conversational, enthusiastic tone
+- Visual guidance for each segment
+
+**Age Brackets**:
+
+- Ages 4-6: Reading level ~2.5
+- Ages 6-8: Reading level ~3.5
+- Ages 9-11: Reading level ~4.5
+- Ages 12-14: Reading level ~6.5
+- Ages 15+: Reading level ~8.5
+
+**Input**:
+
+```typescript
+{
+  sessionId: string;
+  data: {
+    topic: string;
+    facts: Array<{ concept: string; details: string }>;
+    target_duration: number;
+    child_age: string | null;
+    child_interest: string | null;
+  }
+}
+```
+
+**Output**:
+
+```typescript
+{
+  success: boolean;
+  data: {
+    script: Narration;
+  };
+  cost: number;
+  duration: number;
+  error?: string;
+}
+```
+
+## Workflow Sequence
+
+### 1. Initial User Message
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant UI as AgentCreateInterface
+    participant Store as Zustand Store
+    participant API as /api/agent-create/tools
+    participant AI as GPT-4o-mini
+    participant DB as Database
+
+    User->>UI: Enter message (e.g., "My student is 10 and loves soccer")
+    UI->>Store: handleSubmit(message)
+    Store->>Store: Extract PDF text if attached
+    Store->>API: POST { messages, sessionId }
+    API->>DB: Get or create session
+    API->>DB: Load conversation history
+    API->>AI: streamText with tools + messages
+    AI->>AI: Analyze message
+    AI->>AI: Decide: call saveStudentInfoTool
+    AI->>API: Execute saveStudentInfoTool
+    API->>DB: UPDATE session (childAge, childInterest)
+    API-->>Store: JSON response { success, message }
+    Store->>Store: Update state (childAge, childInterest)
+    Store-->>UI: Trigger re-render
+    UI-->>User: Show assistant message
+```
+
+### 2. Extract Facts from Learning Materials
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant UI as AgentCreateInterface
+    participant Store as Zustand Store
+    participant API as /api/agent-create/tools
+    participant AI as GPT-4o-mini
+    participant Tool as extractFactsTool
+    participant Agent as FactExtractionAgent
+    participant DB as Database
+
+    User->>UI: Upload PDF or paste text
+    UI->>Store: handleSubmit(message + files)
+    Store->>Store: Extract PDF text
+    Store->>API: POST { messages, sessionId }
+    API->>DB: Load conversation history
+    API->>AI: streamText with tools + messages
+    AI->>AI: Detect learning materials
+    AI->>AI: Decide: call extractFactsTool
+    AI->>Tool: Execute extractFactsTool(content)
+    Tool->>Agent: process({ content })
+    Agent->>AI: generateText with fact extraction prompt
+    AI-->>Agent: JSON with facts
+    Agent-->>Tool: { facts, topic, message }
+    Tool-->>API: JSON string
+    API->>DB: UPDATE session (extractedFacts, topic) [async]
+    API-->>Store: JSON { facts, message, topic }
+    Store->>Store: setFacts(facts), setWorkflowStep("selection")
+    Store-->>UI: Trigger re-render
+    UI-->>User: Show facts in DocumentEditor + FactSelectionPrompt
+```
+
+### 3. Generate Narration from Selected Facts
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant UI as AgentCreateInterface
+    participant Store as Zustand Store
+    participant API as /api/agent-create/tools
+    participant AI as GPT-4o-mini
+    participant Tool as generateNarrationTool
+    participant Agent as NarrativeBuilderAgent
+    participant DB as Database
+
+    User->>UI: Select facts, click "Submit Facts"
+    UI->>Store: handleSubmitFacts()
+    Store->>API: POST { messages, selectedFacts, sessionId }
+    API->>DB: UPDATE session (confirmedFacts)
+    API->>DB: Load conversation history
+    API->>AI: streamText with tools + system prompt about facts
+    AI->>AI: Detect confirmed facts
+    AI->>AI: Decide: call generateNarrationTool
+    AI->>Tool: Execute generateNarrationTool(facts)
+    Tool->>DB: Load confirmedFacts, childAge, childInterest
+    Tool->>Agent: process({ topic, facts, child_age, child_interest })
+    Agent->>AI: generateText with narration prompt
+    AI-->>Agent: JSON with script segments
+    Agent-->>Tool: { script }
+    Tool-->>API: JSON string { narration, message }
+    API->>DB: UPDATE session (generatedScript) [async]
+    API-->>Store: JSON { narration, message }
+    Store->>Store: setNarration(narration), setWorkflowStep("review")
+    Store-->>UI: Trigger re-render
+    UI-->>User: Show narration in DocumentEditor + NarrationReviewPrompt
+```
+
+## Session Management
+
+### Session Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> NoSession: User visits /dashboard/create
+
+    NoSession --> CreateSession: First message submitted
+    CreateSession --> FactsExtracted: extractFactsTool called
+
+    FactsExtracted --> FactsExtracted: User edits facts
+    FactsExtracted --> ScriptGenerated: generateNarrationTool called
+
+    ScriptGenerated --> ScriptGenerated: User edits narration
+    ScriptGenerated --> VideoQueued: User submits for video
+
+    VideoQueued --> Completed: Video generated
+    Completed --> [*]
+
+    NoSession --> LoadSession: Navigate to /dashboard/history/:id
+    LoadSession --> FactsExtracted: Session has extractedFacts
+    LoadSession --> ScriptGenerated: Session has generatedScript
+
+    note right of CreateSession
+        status: "created"
+        x-session-id header sent
+    end note
+
+    note right of FactsExtracted
+        status: "facts_extracted"
+        extractedFacts populated
+    end note
+
+    note right of ScriptGenerated
+        status: "script_generated"
+        generatedScript populated
+    end note
+```
+
+### Session Utilities
+
+**Location**: `frontend/src/server/utils/session-utils.ts`
+
+**`getSessionIdFromRequest(req, body)`**
+
+- Checks: Header (`x-session-id`) → Body (`sessionId`) → Query param → null
+- Returns: `string | null`
+
+**`validateSession(sessionId, userId)`**
+
+- Ensures session exists and belongs to user
+- Returns: `boolean`
+
+**`getOrCreateSession(userId, sessionId?)`**
+
+- If sessionId valid: returns it
+- If sessionId invalid/missing: creates new session with nanoid
+- Returns: `string` (sessionId)
+
+## Frontend Integration
+
+### Zustand Store
+
+**Location**: `frontend/src/stores/agent-create-store.ts`
+
+**Key State**:
+
+```typescript
+{
+  // Messages
+  messages: Message[];
+
+  // Workflow
+  workflowStep: "input" | "selection" | "review";
+
+  // Data
+  facts: Fact[];
+  selectedFacts: Fact[];
+  narration: Narration | null;
+
+  // Session
+  sessionId: string | null;
+
+  // Student Info
+  childAge: string | null;
+  childInterest: string | null;
+
+  // UI
+  showFactSelectionPrompt: boolean;
+  showNarrationReviewPrompt: boolean;
+}
+```
+
+**Key Actions**:
+
+- `handleSubmit()` - Sends message to API, handles PDF extraction
+- `handleSubmitFacts()` - Saves selected facts, triggers narration
+- `loadSession()` - Loads session from DB for history view
+- `reset()` - Clears state for new session
+
+### Component Hierarchy
+
+```
+AgentCreateInterface
+├── ChatPanel (left 40%)
+│   ├── ChatHeader
+│   ├── ChatWelcome (if no messages)
+│   ├── ChatMessageList
+│   │   ├── Message (user/assistant)
+│   │   └── ScriptGenerationChainOfThought (during loading)
+│   ├── FactSelectionPrompt (if workflowStep === "selection")
+│   ├── NarrationReviewPrompt (if workflowStep === "review")
+│   └── PromptInput
+└── DocumentEditor (right 60%)
+    ├── FactExtractionPanel (if facts exist)
+    └── NarrationEditor (if narration exists)
+```
+
+## Error Handling
+
+### API Errors
+
+```typescript
+try {
+  const result = streamText({ ... });
+  await result.text;
+  return Response({ ...toolResults });
+} catch (error) {
+  return Response({
+    error: "Failed to process request",
+    message: error.message
+  }, { status: 500 });
+}
+```
+
+### Tool Errors
+
+Tools catch errors and return JSON with error messages:
+
+```typescript
+try {
+  // ... tool logic
+  return JSON.stringify({ success: true, ... });
+} catch (error) {
+  return JSON.stringify({
+    success: false,
+    message: `Failed: ${error.message}`
+  });
+}
+```
+
+### Agent Errors
+
+Agents return structured error responses:
+
+```typescript
+{
+  success: false,
+  data: {},
+  cost: 0.0,
+  duration: elapsed,
+  error: error.message
+}
+```
+
+### Frontend Error Display
+
+```typescript
+{
+  error && (
+    <div className="p-4 text-sm text-red-500">Error: {error.message}</div>
+  );
+}
+```
+
+## Cost Tracking
+
+Both agents track OpenAI API costs:
+
+**GPT-4o-mini Pricing** (as of implementation):
+
+- Input: ~$0.15 per 1M tokens
+- Output: ~$0.60 per 1M tokens
+
+```typescript
+const cost =
+  (inputTokens * 0.15) / 1_000_000 + (outputTokens * 0.6) / 1_000_000;
+```
+
+Agents return `cost` and `duration` in their response for monitoring.
 
 ## File Structure
 
 ```
 frontend/src/
-├── server/
-│   ├── workflows/
-│   │   ├── orchestrator-agent.ts      # AI-driven orchestrator with tools
-│   │   ├── agents/
-│   │   │   ├── base-agent.ts           # Base agent interface
-│   │   │   ├── fact-extraction-agent.ts
-│   │   │   ├── script-generation-agent.ts
-│   │   │   └── image-selection-agent.ts
-│   │   ├── schemas/
-│   │   │   ├── fact-extraction-schema.ts
-│   │   │   ├── script-generation-schema.ts
-│   │   │   └── image-selection-schema.ts
-│   │   └── utils/
-│   │       ├── extractPDF.ts           # Server-side PDF extraction
-│   │       ├── extractURL.ts           # Server-side URL extraction
-│   │       └── google-search.ts        # Google Programmable Search Engine integration
-│   └── db/
-│       └── video-generation/
-│           └── schema.ts               # Database schema
 ├── app/
 │   └── api/
-│       └── chat/
-│           └── route.ts                # Chat API endpoint
-└── types/
-    └── workflow.ts                      # Workflow types
+│       └── agent-create/
+│           ├── route.ts                    # Main chat endpoint (alternative)
+│           ├── session/
+│           │   └── route.ts                # GET session data
+│           └── tools/
+│               ├── route.ts                # Tool-calling chat endpoint (PRIMARY)
+│               └── _tools/
+│                   ├── save-student-info-tool.ts
+│                   ├── extract-facts-tools.ts
+│                   └── generate-narration-tool.ts
+├── server/
+│   ├── agents/
+│   │   ├── fact-extraction.ts
+│   │   └── narrative-builder.ts
+│   └── utils/
+│       ├── session-utils.ts
+│       └── message-utils.ts
+├── stores/
+│   └── agent-create-store.ts
+└── components/
+    └── agent-create/
+        ├── agent-create-interface.tsx      # Main interface
+        ├── chat/
+        │   ├── chat-header.tsx
+        │   ├── chat-welcome.tsx
+        │   └── chat-message-list.tsx
+        ├── prompts/
+        │   ├── fact-selection-prompt.tsx
+        │   └── narration-review-prompt.tsx
+        └── editors/
+            └── document-editor.tsx
 ```
 
-## Environment Variables
+## Key Design Decisions
 
-```env
-# OpenAI
-OPENAI_API_KEY=sk-...
+### 1. Why Tool Calling Instead of Orchestrator?
 
-# Google Programmable Search Engine
-GOOGLE_SEARCH_API_KEY=...
-GOOGLE_SEARCH_ENGINE_ID=...
+**Current Approach**: Direct tool calling with `streamText()`
 
-# AWS S3
-S3_BUCKET_NAME=...
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
-AWS_REGION=...
-```
+- Simpler implementation
+- Lower latency (one AI call decides which tool)
+- Easier to debug
+- Works well for 3 tools
+
+**Orchestrator Pattern** (future consideration):
+
+- Better for complex workflows with many tools
+- Better separation of concerns
+- More flexible routing
+
+### 2. Why JSON Response Instead of Streaming Objects?
+
+**Current**: Consume full stream, return JSON
+
+- Simpler client handling
+- Complete results at once
+- Works well with Zustand store
+
+**Streaming** (future enhancement):
+
+- Better UX with progressive updates
+- Lower perceived latency
+- More complex state management
+
+### 3. Why Non-Blocking Database Updates?
+
+Tool results are saved to database asynchronously:
+
+- Faster API responses
+- Don't block on DB latency
+- Errors don't fail the request
+- Trade-off: Potential inconsistency (acceptable for this use case)
 
 ## Future Enhancements
 
-1. **Hybrid Approach**: Use deterministic routing for simple cases, AI orchestrator for complex decisions
+1. **Streaming Structured Outputs**
 
-2. **Tool Chaining**: Allow tools to call other tools (e.g., image tool can call script tool if script is missing)
+   - Use `streamObject()` for real-time fact/narration generation
+   - Progressive UI updates as data streams in
 
-3. **Streaming Tools**: ✅ Implemented - Uses `streamObject()` to stream both chat and documents in real-time
+2. **Image Selection Tool**
 
-4. **Cost Optimization**: Cache tool results, batch operations, use cheaper models where possible
+   - Google Programmable Search integration
+   - Return top 6 images for user selection
+   - S3 upload for selected images
 
-5. **Error Recovery**: Better error handling and automatic retry logic
+3. **Cost Optimization**
 
-6. **Analytics**: Track tool usage, success rates, and costs per workflow step
+   - Cache extracted facts for similar content
+   - Use GPT-4o-mini for most tasks, GPT-4 only when needed
+   - Batch operations where possible
+
+4. **Enhanced Personalization**
+
+   - Learning style detection
+   - Multiple interest incorporation
+   - Adaptive difficulty based on prior interactions
+
+5. **Error Recovery**
+
+   - Automatic retry with exponential backoff
+   - Fallback to simpler prompts if complex ones fail
+   - User-friendly error messages with suggested actions
+
+6. **Analytics**
+   - Track tool usage patterns
+   - Monitor costs per session
+   - Measure success rates for each agent
+
+## Related Documentation
+
+- **Frontend User Journey**: See [`agent-create-interface-journey.md`](./agent-create-interface-journey.md) for UI flow and component details

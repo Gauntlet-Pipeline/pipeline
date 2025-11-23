@@ -32,6 +32,7 @@ interface AgentCreateState {
   sessionStatus: string | null;
   thinkingStatus: ThinkingStatus;
   factsLocked: boolean;
+  narrationLocked: boolean;
   childAge: string | null;
   childInterest: string | null;
   showFactSelectionPrompt: boolean;
@@ -52,6 +53,7 @@ interface AgentCreateState {
   setSessionId: (id: string | null) => void;
   setThinkingStatus: (status: ThinkingStatus) => void;
   setFactsLocked: (locked: boolean) => void;
+  setNarrationLocked: (locked: boolean) => void;
   setChildInfo: (age: string, interest: string) => void;
   setShowFactSelectionPrompt: (show: boolean) => void;
   setShowNarrationReviewPrompt: (show: boolean) => void;
@@ -69,6 +71,7 @@ interface AgentCreateState {
   }) => void;
   extractFacts: (messagesToSend: Message[]) => Promise<void>;
   handleSubmitFacts: () => Promise<void>;
+  handleVerifyNarration: () => Promise<void>;
   handleSubmit: (message: {
     text: string;
     files: FileUIPart[];
@@ -220,6 +223,7 @@ export const useAgentCreateStore = create<AgentCreateState>()(
       sessionStatus: null,
       thinkingStatus: null,
       factsLocked: false,
+      narrationLocked: false,
       childAge: null,
       childInterest: null,
       showFactSelectionPrompt: false,
@@ -253,6 +257,7 @@ export const useAgentCreateStore = create<AgentCreateState>()(
       setSessionId: (id) => set({ sessionId: id }),
       setThinkingStatus: (status) => set({ thinkingStatus: status }),
       setFactsLocked: (locked) => set({ factsLocked: locked }),
+      setNarrationLocked: (locked) => set({ narrationLocked: locked }),
       setChildInfo: (age, interest) =>
         set({ childAge: age, childInterest: interest }),
       setShowFactSelectionPrompt: (show) =>
@@ -283,6 +288,7 @@ export const useAgentCreateStore = create<AgentCreateState>()(
           sessionStatus: null,
           thinkingStatus: null,
           factsLocked: false,
+          narrationLocked: false,
           childAge: null,
           childInterest: null,
           showFactSelectionPrompt: false,
@@ -487,59 +493,65 @@ export const useAgentCreateStore = create<AgentCreateState>()(
         }
       },
 
+      handleVerifyNarration: async () => {
+        const state = get();
+        if (!state.sessionId || !state.narration) return;
+
+        try {
+          state.setIsLoading(true);
+          state.setError(null);
+
+          const response = await fetch("/api/agent-create/session/narration", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: state.sessionId,
+              narration: state.narration,
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error("Failed to save narration changes");
+          }
+
+          // Lock the narration after successful save
+          state.setNarrationLocked(true);
+
+          // Add confirmation message
+          state.addMessage({
+            role: "assistant",
+            content:
+              "Narration verified and saved! You can now proceed to create the video.",
+            id: Date.now().toString(),
+          });
+        } catch (error) {
+          console.error("Failed to verify narration:", error);
+          state.setError(error as Error);
+        } finally {
+          state.setIsLoading(false);
+        }
+      },
+
       handleSubmit: async (message) => {
         if (!message.text.trim() && message.files.length === 0) return;
 
         const state = get();
 
-        // Process PDF files and extract text
-        let finalMessageText = message.text.trim();
-        const extractedContent: string[] = [];
+        // Check if PDF is present
+        const hasPdf = message.files.some(
+          (f) => f.mediaType === "application/pdf",
+        );
 
-        // Extract text from PDFs
-        for (const filePart of message.files) {
-          if (filePart.mediaType === "application/pdf") {
-            try {
-              // Fetch the PDF file
-              const response = await fetch(filePart.url);
-              const blob = await response.blob();
-              const file = new File(
-                [blob],
-                filePart.filename ?? "document.pdf",
-                {
-                  type: "application/pdf",
-                },
-              );
-
-              // Extract text from PDF
-              const { extractTextFromPDF } = await import("@/lib/extractPDF");
-              const pdfText = await extractTextFromPDF(file);
-              extractedContent.push(
-                `--- Content from ${filePart.filename ?? "PDF"} ---\n${pdfText}`,
-              );
-            } catch (error) {
-              console.error("Error extracting PDF text:", error);
-              // Continue even if PDF extraction fails
-            }
-          }
-        }
-
-        // Combine user text with extracted PDF content
-        if (extractedContent.length > 0) {
-          finalMessageText += `\n\n--- Extracted Learning Materials ---\n${extractedContent.join("\n\n")}`;
-        }
-
-        if (!finalMessageText.trim()) return;
-
-        // Store file attachments for display (but not the extracted text in content)
-        const displayContent = message.text.trim() || "PDF attached";
+        // Create clean message WITHOUT embedded PDF text
         const fileAttachments = message.files.filter(
           (file) => file.mediaType === "application/pdf",
         );
 
         const newMessage: Message = {
           role: "user",
-          content: finalMessageText, // Full content with extracted PDF text for API
+          content:
+            message.text.trim() ||
+            (hasPdf ? "PDF materials uploaded for analysis" : ""),
           id: Date.now().toString(),
           files: fileAttachments.length > 0 ? fileAttachments : undefined,
         };
@@ -549,16 +561,156 @@ export const useAgentCreateStore = create<AgentCreateState>()(
         state.setIsLoading(true);
         state.setError(null);
 
+        // Process PDF BEFORE sending to AI (upload must complete first)
+        if (hasPdf) {
+          // Let React update UI first by yielding control
+          await new Promise((resolve) => setTimeout(resolve, 0));
+
+          for (const filePart of message.files) {
+            if (filePart.mediaType === "application/pdf") {
+              try {
+                const response = await fetch(filePart.url);
+                const blob = await response.blob();
+                const file = new File(
+                  [blob],
+                  filePart.filename ?? "document.pdf",
+                  { type: "application/pdf" },
+                );
+
+                // Extract text immediately (fast - doesn't block UI)
+                const { extractTextFromPDF } = await import("@/lib/extractPDF");
+                const pdfText = await extractTextFromPDF(file);
+
+                // Upload PDF with text first (fast path - don't wait for images)
+                const formData = new FormData();
+                formData.append("pdf", file);
+                const currentSessionId = get().sessionId;
+                if (currentSessionId) {
+                  formData.append("sessionId", currentSessionId);
+                }
+                formData.append("extractedText", pdfText);
+                formData.append("imageCount", "0"); // Will upload images separately
+
+                const uploadResponse = await fetch(
+                  "/api/agent-create/session/upload-pdf",
+                  {
+                    method: "POST",
+                    body: formData,
+                  },
+                );
+
+                if (!uploadResponse.ok) {
+                  const errorText = await uploadResponse.text();
+                  console.error("Failed to upload PDF:", errorText);
+                  // Don't stop - continue to extractFacts even if upload fails
+                } else {
+                  const uploadData = (await uploadResponse.json()) as {
+                    sessionId: string;
+                    pdfUrl: string;
+                    imageCount: number;
+                  };
+
+                  // Store sessionId if it was just created
+                  if (uploadData.sessionId && !get().sessionId) {
+                    get().setSessionId(uploadData.sessionId);
+                  }
+
+                  if (process.env.NODE_ENV === "development") {
+                    console.log(`PDF uploaded: ${uploadData.pdfUrl}`);
+                  }
+
+                  // Extract and upload images in background (non-blocking)
+                  void (async () => {
+                    try {
+                      if (process.env.NODE_ENV === "development") {
+                        console.log("Background: Starting image extraction...");
+                      }
+
+                      const { extractImagesFromPdf } = await import(
+                        "@/lib/pdf-image-extractor"
+                      );
+                      const extractedImages = await extractImagesFromPdf(file);
+
+                      if (process.env.NODE_ENV === "development") {
+                        console.log(
+                          `Background: Extracted ${extractedImages.length} images`,
+                        );
+                      }
+
+                      if (extractedImages.length > 0 && uploadData.sessionId) {
+                        if (process.env.NODE_ENV === "development") {
+                          console.log(
+                            "Background: Uploading images to server...",
+                          );
+                        }
+
+                        // Upload images separately
+                        const imageFormData = new FormData();
+                        imageFormData.append("sessionId", uploadData.sessionId);
+                        imageFormData.append(
+                          "imageCount",
+                          extractedImages.length.toString(),
+                        );
+
+                        extractedImages.forEach((img, index) => {
+                          const filename = `page_${img.pageNumber}_img_${img.imageIndex}.png`;
+                          const imageFile = new File([img.blob], filename, {
+                            type: "image/png",
+                          });
+                          imageFormData.append(`image_${index}`, imageFile);
+                        });
+
+                        const imageUploadResponse = await fetch(
+                          "/api/agent-create/session/upload-images",
+                          {
+                            method: "POST",
+                            body: imageFormData,
+                          },
+                        );
+
+                        if (imageUploadResponse.ok) {
+                          if (process.env.NODE_ENV === "development") {
+                            console.log(
+                              `Background: Uploaded ${extractedImages.length} images from PDF`,
+                            );
+                          }
+                        } else {
+                          console.error(
+                            "Background image upload failed:",
+                            await imageUploadResponse.text(),
+                          );
+                        }
+                      } else {
+                        if (process.env.NODE_ENV === "development") {
+                          console.log(
+                            `Background: Skipping image upload - images: ${extractedImages.length}, sessionId: ${uploadData.sessionId ? "present" : "missing"}`,
+                          );
+                        }
+                      }
+                    } catch (error) {
+                      console.error(
+                        "Background image extraction failed:",
+                        error,
+                      );
+                      // Silent fail - images are optional
+                    }
+                  })();
+                }
+              } catch (error) {
+                console.error("Error processing PDF:", error);
+                // Don't stop - continue to extractFacts even if PDF processing fails
+              }
+            }
+          }
+        }
+
         try {
           if (state.workflowStep === "input") {
             await state.extractFacts(newMessages);
           } else if (state.workflowStep === "review") {
-            // Reset state for new extraction
             state.reset();
             await state.extractFacts(newMessages);
           } else if (state.workflowStep === "selection") {
-            // User is trying to add more content while in selection mode
-            // Reset and start over with new content
             state.reset();
             state.setMessages(newMessages);
             await state.extractFacts(newMessages);
@@ -647,6 +799,7 @@ export const useAgentCreateStore = create<AgentCreateState>()(
             facts: extractedFacts,
             selectedFacts: confirmedFacts,
             narration: data.session.generatedScript ?? null,
+            narrationLocked: hasGeneratedScript,
             childAge: data.session.childAge ?? null,
             childInterest: data.session.childInterest ?? null,
             workflowStep: hasConfirmedFacts
@@ -673,7 +826,7 @@ export const useAgentCreateStore = create<AgentCreateState>()(
     }),
     {
       name: "agent-create-storage",
-      partialize: (state) => ({}), // Don't persist anything - sessionId is now URL-based
+      partialize: (_state) => ({}), // Don't persist anything - sessionId is now URL-based
     },
   ),
 );

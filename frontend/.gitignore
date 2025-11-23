@@ -44,3 +44,6 @@ yarn-error.log*
 
 # idea files
 .idea
+
+# PDF.js worker (auto-generated from node_modules via postinstall script)
+/public/pdf.worker.min.mjs

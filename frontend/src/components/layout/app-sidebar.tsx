@@ -95,7 +95,8 @@ export function AppSidebar({
   }, [sessions]);
 
   // Compute if we're on a create route with session (same on server and client)
-  const isOnHistoryRoute = pathname === "/dashboard/create" && !!currentSessionId;
+  const isOnHistoryRoute =
+    pathname === "/dashboard/create" && !!currentSessionId;
 
   // Only show active styling after mount to avoid hydration mismatch
   const isHistoryActive = mounted && isOnHistoryRoute;
@@ -132,7 +133,8 @@ export function AppSidebar({
                       key={item.title}
                       id="sidebar-history-collapsible"
                       asChild
-                      defaultOpen={isOnHistoryRoute}
+                      defaultOpen={true}
+                      className="group"
                     >
                       <SidebarMenuItem>
                         <CollapsibleTrigger asChild>
@@ -142,7 +144,7 @@ export function AppSidebar({
                           >
                             <item.icon />
                             <span>{item.title}</span>
-                            <ChevronRight className="ml-auto size-4 transition-transform duration-200 data-[state=open]:rotate-90" />
+                            <ChevronRight className="ml-auto size-4 transition-transform duration-200 group-data-[state=open]:rotate-90" />
                           </SidebarMenuButton>
                         </CollapsibleTrigger>
                         <CollapsibleContent>

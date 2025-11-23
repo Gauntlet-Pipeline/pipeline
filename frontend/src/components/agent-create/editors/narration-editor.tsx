@@ -25,8 +25,13 @@ import { useWebSocket } from "@/hooks/useWebSocket";
 import { Button } from "@/components/ui/button";
 
 export function NarrationEditor() {
-  const { narration, setNarration, sessionId, isVideoGenerating } =
-    useAgentCreateStore();
+  const {
+    narration,
+    setNarration,
+    sessionId,
+    isVideoGenerating,
+    narrationLocked,
+  } = useAgentCreateStore();
 
   // WebSocket connection for video generation progress
   // Only connect when video generation has actually started
@@ -66,6 +71,12 @@ export function NarrationEditor() {
           <div className="flex items-center gap-2">
             <FilmIcon className="text-muted-foreground size-4" />
             <h3 className="text-sm font-semibold">Script Information</h3>
+            {narrationLocked && (
+              <Badge variant="secondary" className="text-xs">
+                <CheckCircle2 className="mr-1 size-3" />
+                Verified
+              </Badge>
+            )}
           </div>
           {sessionId && (
             <div className="flex items-center gap-1">
@@ -213,7 +224,7 @@ export function NarrationEditor() {
                     htmlFor={`narration-${segment.id}`}
                     className="text-muted-foreground text-xs font-medium"
                   >
-                    Narration
+                    Narration {narrationLocked && "(Read-only)"}
                   </Label>
                   <Textarea
                     id={`narration-${segment.id}`}
@@ -222,6 +233,8 @@ export function NarrationEditor() {
                       handleSegmentChange(index, "narration", e.target.value)
                     }
                     className="bg-background min-h-[80px] resize-none text-sm"
+                    disabled={narrationLocked}
+                    readOnly={narrationLocked}
                   />
                 </div>
 
@@ -230,7 +243,7 @@ export function NarrationEditor() {
                     htmlFor={`visual-${segment.id}`}
                     className="text-muted-foreground text-xs font-medium"
                   >
-                    Visual Guidance
+                    Visual Guidance {narrationLocked && "(Read-only)"}
                   </Label>
                   <Textarea
                     id={`visual-${segment.id}`}
@@ -243,6 +256,8 @@ export function NarrationEditor() {
                       )
                     }
                     className="bg-background min-h-[60px] resize-none text-sm"
+                    disabled={narrationLocked}
+                    readOnly={narrationLocked}
                   />
                 </div>
 
