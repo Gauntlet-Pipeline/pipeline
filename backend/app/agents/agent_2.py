@@ -52,8 +52,12 @@ async def agent_2_process(
         storage_service = StorageService()
     
     # Query video_session table if db is provided
+    # Agent2 always queries the database when db is provided, using user_id and session_id from orchestrator
+    # The database connection uses DATABASE_URL from AWS Secrets Manager (via database.py)
+    # If db query fails but video_session_data is provided, fall back to using provided data
     if db is not None:
         try:
+            logger.info(f"Agent2 querying video_session table for session_id={session_id}, user_id={user_id}")
             result = db.execute(
                 sql_text(
                     "SELECT * FROM video_session WHERE id = :session_id AND user_id = :user_id"
@@ -78,10 +82,18 @@ async def agent_2_process(
                     "child_age": getattr(result, "child_age", None),
                     "child_interest": getattr(result, "child_interest", None),
                 }
-            logger.info(f"Agent2 loaded video_session data for session {session_id}")
+            logger.info(f"Agent2 successfully loaded video_session data for session {session_id} from database (using DATABASE_URL from Secrets Manager)")
         except Exception as e:
-            logger.error(f"Agent2 failed to query video_session: {e}")
-            raise
+            logger.error(f"Agent2 failed to query video_session table: {e}")
+            # If video_session_data was provided as fallback, use it instead of raising
+            if video_session_data is None:
+                raise
+            else:
+                logger.warning(f"Agent2 falling back to provided video_session_data due to database query failure")
+    
+    if video_session_data is None:
+        # If no db and no video_session_data provided, this is an error
+        raise ValueError(f"Agent2 requires either db session or video_session_data. Neither provided for session {session_id}")
     
     # Extract data from video_session if provided
     topic = None
@@ -182,16 +194,21 @@ async def agent_2_process(
         
         # TODO: Add initialization/preparation logic here
         
-        # Extract script from generation_script or generate it
+        # Extract script from generation_script - FAIL if missing or incomplete
         script = extract_script_from_generated_script(generation_script)
         script_was_generated = False
         
         if not script or not all(key in script for key in ["hook", "concept", "process", "conclusion"]):
-            # Generate script if missing or incomplete
-            script_was_generated = True
-            if video_session_data and "generation_script" not in generated_fields:
-                generated_fields.append("generation_script")
-            script = generate_script_structure()
+            # Script is missing or incomplete - this is an error, not a fallback scenario
+            error_msg = (
+                f"Agent2 cannot proceed without a valid script from video_session. "
+                f"Session {session_id} has missing or incomplete generated_script. "
+                f"generation_script is None: {generation_script is None}, "
+                f"extracted script is None: {script is None}, "
+                f"video_session_data exists: {video_session_data is not None}"
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         
         # Report processing status
         processing_kwargs = {}

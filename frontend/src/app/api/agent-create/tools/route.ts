@@ -243,10 +243,10 @@ export async function POST(req: Request) {
   let assistantTextResponse = "";
 
   // Build system prompt based on context
-  let systemPrompt = `You are an expert educational AI assistant helping teachers create personalized biology videos for individual students.
+  let systemPrompt = `You are an expert educational AI assistant helping teachers create personalized history videos for individual students.
 
 Your role:
-- Help teachers create engaging biology videos tailored to specific students
+- Help teachers create engaging history videos tailored to specific students
 - Gather student information (age and interests) when provided to personalize content
 - Extract key facts from lesson materials
 - Generate age-appropriate, personalized narration scripts
