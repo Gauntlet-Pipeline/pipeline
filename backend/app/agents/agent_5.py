@@ -2,14 +2,14 @@
 Agent 5 - Video Generator using FFmpeg
 
 Generates a 60-second video from pipeline data:
-1. Generates AI videos in parallel using Replicate (Google Veo 3)
+1. Generates AI videos sequentially using Replicate (Kling v1.5 Pro)
 2. Downloads and concatenates all narration audio files
 3. Mixes concatenated narration with background music
 4. Concatenates all video clips into one video
 5. Combines final video with final audio
 6. Uploads final video to S3
 
-Uses Google Veo 3 for AI-generated video clips (~$1.20/6s video, without audio)
+Uses Kling v1.5 Pro for AI-generated video clips (~$0.15/5s video)
 """
 import asyncio
 import json
@@ -33,6 +33,7 @@ from app.services.storage import StorageService
 from app.services.replicate_video import ReplicateVideoService
 from app.services.video_verifier import VideoVerificationService
 from app.config import get_settings
+from app.agents.helpers.dalle_generator import DALLEGenerator
 
 
 async def generate_video_replicate(
@@ -48,7 +49,7 @@ async def generate_video_replicate(
     Args:
         prompt: Visual description for the video
         api_key: Replicate API key
-        model: Model to use ("veo3", "minimax", "kling", "luma")
+        model: Model to use ("veo3", "kling", "minimax", "luma")
         progress_callback: Optional callback for progress updates
         seed: Optional random seed for reproducibility
 
@@ -464,13 +465,14 @@ async def agent_5_process(
     generation_mode: str = "video",  # Kept for backwards compatibility, always uses video
     db: Optional[Session] = None,
     status_callback: Optional[Callable[[str, str, str, str, int], Awaitable[None]]] = None,
-    restart_from_concat: bool = False  # Skip generation, reuse existing clips from S3
+    restart_from_concat: bool = False,  # Skip generation, reuse existing clips from S3
+    model: str = "kling"  # Video generation model: "veo3", "kling", "minimax", "luma"
 ) -> Optional[str]:
     """
     Agent5: Video generation agent using FFmpeg.
 
     Generates a complete video by:
-    1. Generating AI video clips in parallel using Replicate (Google Veo 3)
+    1. Generating AI video clips sequentially using Replicate (configurable model)
     2. Concatenating all narration audio files
     3. Mixing narration with background music
     4. Concatenating all video clips
@@ -933,13 +935,18 @@ async def agent_5_process(
         # Track completion for progress updates
         completed_videos = []
         
-        # Cost tracking
-        # Google Veo 3: $0.20 per second without audio = $1.20 per 6-second clip
-        COST_PER_CLIP = 1.20  # USD per clip (6 seconds, without audio)
+        # Cost tracking (model-dependent)
+        model_costs = {
+            "veo3": 1.20,      # Google Veo 3: ~$1.20 per 6s
+            "kling": 0.18,     # Kling v1.5 Pro: ~$0.15/5s = $0.18/6s
+            "minimax": 0.042,  # Minimax: ~$0.035/5s = $0.042/6s
+            "luma": 0.24       # Luma: ~$0.20/5s = $0.24/6s
+        }
+        COST_PER_CLIP = model_costs.get(model, 1.20)  # USD per clip (6 seconds)
         # Note: total_cost and cost_per_section are already initialized at function start (line 453-454)
 
         # Constants for video generation
-        CLIP_DURATION = 6.0  # Veo 3 generates 6-second clips
+        CLIP_DURATION = 6.0  # Target 6-second clips
         
         # Rate limiting: Max 4 concurrent Replicate API calls to avoid overwhelming the service
         MAX_CONCURRENT_REPLICATE_CALLS = 4
@@ -1044,14 +1051,28 @@ async def agent_5_process(
             for clip_idx, clip_prompt in enumerate(clip_prompts):
                 async with replicate_semaphore:
                     if clip_idx == 0:
-                        # First clip: text-to-video
-                        logger.info(f"[{session_id}] Generating clip {clip_idx+1}/{clips_needed} (text-to-video)")
-                        clip_url = await generate_video_replicate(
-                            clip_prompt,
-                            replicate_api_key,
-                            model="veo3",
-                            seed=section_seed
-                        )
+                        # First clip: Check if we have an Agent 3 (DALL-E) image for this section
+                        section_image_url = section_images.get(section)
+
+                        if section_image_url:
+                            # Use image-to-video with Agent 3 image (Kling requires start_image)
+                            logger.info(f"[{session_id}] Generating clip {clip_idx+1}/{clips_needed} (image-to-video from Agent 3 image)")
+                            service = ReplicateVideoService(replicate_api_key)
+                            clip_url = await service.generate_video_from_image(
+                                prompt=clip_prompt,
+                                image_url=section_image_url,
+                                model=model,
+                                seed=section_seed
+                            )
+                        else:
+                            # Fallback: text-to-video (if no Agent 3 image available)
+                            logger.info(f"[{session_id}] Generating clip {clip_idx+1}/{clips_needed} (text-to-video - no Agent 3 image)")
+                            clip_url = await generate_video_replicate(
+                                clip_prompt,
+                                replicate_api_key,
+                                model=model,
+                                seed=section_seed
+                            )
                     else:
                         # Subsequent clips: extract last frame from previous clip, then image-to-video
                         logger.info(f"[{session_id}] Generating clip {clip_idx+1}/{clips_needed} (image-to-video with continuity)")
@@ -1064,7 +1085,7 @@ async def agent_5_process(
                         clip_url = await service.generate_video_from_image(
                             prompt=clip_prompt,
                             image_url=frame_data_uri,
-                            model="veo3",
+                            model=model,
                             seed=section_seed
                         )
 
@@ -1151,9 +1172,11 @@ async def agent_5_process(
             logger.info(f"[{session_id}] Downloaded and saved {len(generated_clips)} clips for {section}")
 
             return (section, clip_paths)
-        
+
         # Handle restart mode: download existing clips from S3
         all_clip_paths = []
+        section_images = {}  # Initialize (will be populated with DALL-E images if not in restart mode)
+
         if restart_from_concat:
             logger.info(f"[{session_id}] Restart mode: Downloading existing clips from S3")
             await send_status(
@@ -1212,20 +1235,102 @@ async def agent_5_process(
             logger.info(f"[{session_id}] Restart mode: Loaded {len(all_clip_paths)} total clips from S3")
             total_cost = 0.0  # No cost for restart (clips already generated)
         else:
-            # Generate all videos in parallel (fully parallelized)
-            logger.info(f"[{session_id}] Generating all {len(sections)} sections in parallel")
+            # ====================
+            # AGENT 3: IMAGE GENERATION PHASE
+            # ====================
+            # Generate DALL-E images for all 4 sections using script visual prompts
+            # These images will be used as the starting frame for Kling video generation
+
+            logger.info(f"[{session_id}] Starting Agent 3 (DALL-E) image generation for {len(sections)} sections")
 
             await send_status(
                 "Agent5", "processing",
                 supersessionID=supersessionid,
-                message=f"Generating all {len(sections)} videos in parallel...",
+                message="Generating images with DALL-E for each section...",
                 cost=0.0
             )
 
-            # Process all sections in parallel
-            section_results = await asyncio.gather(
-                *[generate_section_video(section) for section in sections]
+            # Initialize DALL-E generator
+            dalle_generator = DALLEGenerator(api_key=settings.OPENAI_API_KEY)
+
+            # Store generated images for each section
+            section_images = {}
+            image_generation_cost = 0.0
+
+            # Generate images in parallel for all sections
+            async def generate_section_image(section: str) -> tuple[str, Optional[str]]:
+                """Generate a DALL-E image for a section and return (section, image_url)"""
+                visual_prompt = visual_prompts[section]
+
+                logger.info(f"[{session_id}] Generating image for '{section}' with DALL-E")
+                logger.info(f"[{session_id}] Image prompt for '{section}': {visual_prompt[:150]}...")
+
+                try:
+                    # Generate image with DALL-E 3 (standard quality, 16:9 aspect ratio)
+                    result = await dalle_generator.generate_image(
+                        prompt=visual_prompt,
+                        style="educational",
+                        quality="standard"  # $0.04 per image
+                    )
+
+                    if result.get("success"):
+                        image_url = result["url"]
+                        logger.info(f"[{session_id}] Successfully generated image for '{section}': {image_url[:100]}...")
+                        return (section, image_url)
+                    else:
+                        logger.error(f"[{session_id}] Failed to generate image for '{section}': {result.get('error', 'Unknown error')}")
+                        return (section, None)
+
+                except Exception as e:
+                    logger.error(f"[{session_id}] Exception generating image for '{section}': {e}")
+                    return (section, None)
+
+            # Generate all images in parallel
+            image_results = await asyncio.gather(*[generate_section_image(section) for section in sections])
+
+            # Store results and calculate cost
+            for section, image_url in image_results:
+                if image_url:
+                    section_images[section] = image_url
+                    image_generation_cost += 0.04  # DALL-E 3 standard quality cost
+                    logger.info(f"[{session_id}] Stored image for '{section}'")
+                else:
+                    logger.warning(f"[{session_id}] No image generated for '{section}' - will fall back to text-to-video")
+
+            logger.info(f"[{session_id}] Completed image generation. Generated {len(section_images)}/{len(sections)} images. Cost: ${image_generation_cost:.4f}")
+
+            await send_status(
+                "Agent5", "processing",
+                supersessionID=supersessionid,
+                message=f"Generated {len(section_images)}/{len(sections)} images with DALL-E. Starting video generation...",
+                cost=image_generation_cost
             )
+
+            # ====================
+            # VIDEO GENERATION PHASE
+            # ====================
+
+            # Generate all videos in parallel (fully parallelized)
+            logger.info(f"[{session_id}] Generating all {len(sections)} sections in parallel")
+
+            # Model display names
+            model_names = {
+                "veo3": "Google Veo 3",
+                "kling": "Kling v1.5 Pro",
+                "minimax": "Minimax Video-01",
+                "luma": "Luma Dream Machine"
+            }
+            model_display = model_names.get(model, model)
+
+            await send_status(
+                "Agent5", "processing",
+                supersessionID=supersessionid,
+                message=f"Generating videos in parallel with {model_display}...",
+                cost=image_generation_cost
+            )
+
+            # Process sections in parallel for maximum speed
+            section_results = await asyncio.gather(*[generate_section_video(section) for section in sections])
 
             # Collect all clip paths in order (hook, concept, process, conclusion)
             for section in sections:
@@ -1237,8 +1342,8 @@ async def agent_5_process(
 
         # Calculate final total cost (only if not restart mode)
         if not restart_from_concat:
-            total_cost = sum(cost_per_section.values())
-            logger.info(f"[{session_id}] Completed all sections. Total cost: ${total_cost:.4f}")
+            total_cost = sum(cost_per_section.values()) + image_generation_cost
+            logger.info(f"[{session_id}] Completed all sections. Video cost: ${sum(cost_per_section.values()):.4f}, Image cost: ${image_generation_cost:.4f}, Total cost: ${total_cost:.4f}")
 
             await send_status(
                 "Agent5", "processing",
