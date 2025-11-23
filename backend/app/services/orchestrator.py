@@ -1511,6 +1511,42 @@ class VideoGenerationOrchestrator:
 
             logger.info(f"[{session_id}] Generated {successful_count}/{len(video_clip_results)} video clips successfully ({failed_count} failed)")
 
+            # Partial Failure Recovery: Check if we have enough successful clips to proceed
+            total_clips = len(video_clip_results)
+            success_rate = successful_count / total_clips if total_clips > 0 else 0
+            MINIMUM_SUCCESS_THRESHOLD = 0.6  # Require at least 60% of clips to succeed
+
+            if success_rate < MINIMUM_SUCCESS_THRESHOLD:
+                error_msg = (
+                    f"Clip generation failed: Only {successful_count}/{total_clips} clips succeeded "
+                    f"({success_rate * 100:.1f}%). Minimum threshold is {MINIMUM_SUCCESS_THRESHOLD * 100:.1f}%."
+                )
+                logger.error(f"[{session_id}] {error_msg}")
+
+                await self.websocket_manager.broadcast_status(
+                    session_id,
+                    status="error",
+                    progress=70,
+                    details=error_msg
+                )
+
+                raise Exception(error_msg)
+
+            elif success_rate < 1.0:
+                # Partial success - log warning but continue
+                warning_msg = (
+                    f"Partial clip generation: {successful_count}/{total_clips} clips succeeded "
+                    f"({success_rate * 100:.1f}%). Continuing with available clips."
+                )
+                logger.warning(f"[{session_id}] {warning_msg}")
+
+                await self.websocket_manager.broadcast_status(
+                    session_id,
+                    status="generating_clips",
+                    progress=75,
+                    details=warning_msg
+                )
+
             # Build final timeline with multiple clips per segment
             # IMPORTANT: Only the first clip of each part gets the audio_url
             # This prevents repeated narration when we have multiple clips per part
