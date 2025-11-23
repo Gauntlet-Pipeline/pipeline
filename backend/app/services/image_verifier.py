@@ -30,13 +30,15 @@ logger = logging.getLogger(__name__)
 class ImageVerificationService:
     """Service for verifying image quality and integrity."""
 
-    def __init__(self):
+    def __init__(self, websocket_manager=None, session_id: Optional[str] = None):
         self.min_resolution_width = 512  # Minimum width
         self.min_resolution_height = 512  # Minimum height
         self.expected_aspect_ratio = 16 / 9  # 16:9 aspect ratio
         self.aspect_ratio_tolerance = 0.1  # 10% tolerance
         self.min_file_size = 10 * 1024  # 10 KB minimum
         self.max_file_size = 20 * 1024 * 1024  # 20 MB maximum
+        self.websocket_manager = websocket_manager
+        self.session_id = session_id
 
     async def verify_image(
         self,
@@ -55,6 +57,19 @@ class ImageVerificationService:
         Returns:
             VerificationResult with all check results
         """
+        # Send WebSocket update - starting verification
+        if self.websocket_manager and self.session_id:
+            await self.websocket_manager.send_progress(
+                self.session_id,
+                {
+                    "type": "verification_update",
+                    "verification_type": "image",
+                    "status": "verifying",
+                    "image_index": image_index,
+                    "details": f"Verifying image {image_index if image_index is not None else ''}...",
+                }
+            )
+
         result = VerificationResult(
             verification_type=VerificationType.IMAGE,
             status=VerificationStatus.PASSED,
@@ -90,6 +105,22 @@ class ImageVerificationService:
                 f"{len(result.failed_checks)} failures, {len(result.warning_checks)} warnings"
             )
 
+            # Send WebSocket update - verification complete
+            if self.websocket_manager and self.session_id:
+                await self.websocket_manager.send_progress(
+                    self.session_id,
+                    {
+                        "type": "verification_update",
+                        "verification_type": "image",
+                        "status": result.status,
+                        "image_index": image_index,
+                        "passed": result.passed,
+                        "failed_checks_count": len(result.failed_checks),
+                        "warning_checks_count": len(result.warning_checks),
+                        "details": f"Image {image_index if image_index is not None else ''} verification {'passed' if result.passed else 'failed'}",
+                    }
+                )
+
         except Exception as e:
             logger.exception(f"Image verification error: {e}")
             result.status = VerificationStatus.FAILED
@@ -102,6 +133,21 @@ class ImageVerificationService:
                     severity="error",
                 )
             )
+
+            # Send WebSocket update - verification failed
+            if self.websocket_manager and self.session_id:
+                await self.websocket_manager.send_progress(
+                    self.session_id,
+                    {
+                        "type": "verification_update",
+                        "verification_type": "image",
+                        "status": "failed",
+                        "image_index": image_index,
+                        "passed": False,
+                        "error": str(e),
+                        "details": f"Image {image_index if image_index is not None else ''} verification failed with error",
+                    }
+                )
 
         finally:
             # Clean up temporary file

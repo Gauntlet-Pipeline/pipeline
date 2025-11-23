@@ -34,18 +34,22 @@ class BatchImageGeneratorAgent:
     - Targets 60% template usage to minimize costs
     """
 
-    def __init__(self, openai_api_key: str = None):
+    def __init__(self, openai_api_key: str = None, websocket_manager=None, session_id: Optional[str] = None):
         """
         Initialize the Batch Image Generator Agent.
 
         Args:
             openai_api_key: OpenAI API key for DALL-E 3
+            websocket_manager: Optional WebSocket manager for real-time updates
+            session_id: Optional session ID for WebSocket updates
         """
         self.template_matcher = TemplateMatcher()
         self.psd_customizer = PSDCustomizer()
         self.dalle_generator = DALLEGenerator(api_key=openai_api_key)
         self.storage_service = StorageService()
-        self.image_verifier = ImageVerificationService()
+        self.websocket_manager = websocket_manager
+        self.session_id = session_id
+        self.image_verifier = ImageVerificationService(websocket_manager=websocket_manager, session_id=session_id)
 
     async def process(self, input: AgentInput) -> AgentOutput:
         """

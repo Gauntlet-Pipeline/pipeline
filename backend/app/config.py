@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
     DEBUG: bool = True
+    USE_AWS_SECRETS: bool = False  # Set to True in production to use AWS Secrets Manager
 
     class Config:
         env_file = ".env"

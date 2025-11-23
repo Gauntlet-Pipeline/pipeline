@@ -30,11 +30,13 @@ logger = logging.getLogger(__name__)
 class VideoVerificationService:
     """Service for verifying video quality and integrity."""
 
-    def __init__(self):
+    def __init__(self, websocket_manager=None, session_id: Optional[str] = None):
         self.min_resolution_width = 720  # Minimum 720p
         self.min_resolution_height = 480
         self.duration_tolerance = 1.0  # ±1 second tolerance
         self.frame_sample_rate = 10  # Sample every 10th frame
+        self.websocket_manager = websocket_manager
+        self.session_id = session_id
 
     async def verify_clip(
         self,
@@ -53,6 +55,19 @@ class VideoVerificationService:
         Returns:
             VerificationResult with all check results
         """
+        # Send WebSocket update - starting verification
+        if self.websocket_manager and self.session_id:
+            await self.websocket_manager.send_progress(
+                self.session_id,
+                {
+                    "type": "verification_update",
+                    "verification_type": "video_clip",
+                    "status": "verifying",
+                    "clip_index": clip_index,
+                    "details": f"Verifying video clip {clip_index if clip_index is not None else ''}...",
+                }
+            )
+
         result = VerificationResult(
             verification_type=VerificationType.VIDEO_CLIP,
             status=VerificationStatus.PASSED,
@@ -87,6 +102,22 @@ class VideoVerificationService:
                 f"{len(result.failed_checks)} failures, {len(result.warning_checks)} warnings"
             )
 
+            # Send WebSocket update - verification complete
+            if self.websocket_manager and self.session_id:
+                await self.websocket_manager.send_progress(
+                    self.session_id,
+                    {
+                        "type": "verification_update",
+                        "verification_type": "video_clip",
+                        "status": result.status,
+                        "clip_index": clip_index,
+                        "passed": result.passed,
+                        "failed_checks_count": len(result.failed_checks),
+                        "warning_checks_count": len(result.warning_checks),
+                        "details": f"Video clip {clip_index if clip_index is not None else ''} verification {'passed' if result.passed else 'failed'}",
+                    }
+                )
+
         except Exception as e:
             logger.exception(f"Video verification error: {e}")
             result.status = VerificationStatus.FAILED
@@ -99,6 +130,21 @@ class VideoVerificationService:
                     severity="error",
                 )
             )
+
+            # Send WebSocket update - verification failed
+            if self.websocket_manager and self.session_id:
+                await self.websocket_manager.send_progress(
+                    self.session_id,
+                    {
+                        "type": "verification_update",
+                        "verification_type": "video_clip",
+                        "status": "failed",
+                        "clip_index": clip_index,
+                        "passed": False,
+                        "error": str(e),
+                        "details": f"Video clip {clip_index if clip_index is not None else ''} verification failed with error",
+                    }
+                )
 
         finally:
             # Clean up temporary file
@@ -125,8 +171,36 @@ class VideoVerificationService:
         Returns:
             VerificationResult with all check results
         """
+        # Send WebSocket update - starting final video verification
+        if self.websocket_manager and self.session_id:
+            await self.websocket_manager.send_progress(
+                self.session_id,
+                {
+                    "type": "verification_update",
+                    "verification_type": "final_video",
+                    "status": "verifying",
+                    "details": "Verifying final composed video...",
+                }
+            )
+
         result = await self.verify_clip(video_url, expected_duration)
         result.verification_type = VerificationType.FINAL_VIDEO
+
+        # Send WebSocket update - final video verification complete
+        if self.websocket_manager and self.session_id:
+            await self.websocket_manager.send_progress(
+                self.session_id,
+                {
+                    "type": "verification_update",
+                    "verification_type": "final_video",
+                    "status": result.status,
+                    "passed": result.passed,
+                    "failed_checks_count": len(result.failed_checks),
+                    "warning_checks_count": len(result.warning_checks),
+                    "details": f"Final video verification {'passed' if result.passed else 'failed'}",
+                }
+            )
+
         return result
 
     async def _download_video(self, video_url: str) -> str:

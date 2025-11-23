@@ -37,10 +37,15 @@ settings = get_settings()
 def _get_openai_api_key() -> Optional[str]:
     """
     Get OPENAI_API_KEY from AWS Secrets Manager with fallback to settings.
-    
+
     Returns:
         OpenAI API key string, or None if not found
     """
+    # Skip AWS Secrets Manager if USE_AWS_SECRETS is False (local development)
+    if not settings.USE_AWS_SECRETS:
+        logger.debug("USE_AWS_SECRETS=False, using OPENAI_API_KEY from .env")
+        return settings.OPENAI_API_KEY
+
     try:
         from app.services.secrets import get_secret
         return get_secret("pipeline/openai-api-key")
@@ -58,10 +63,15 @@ def _get_openai_api_key() -> Optional[str]:
 def _get_replicate_api_key() -> Optional[str]:
     """
     Get REPLICATE_API_KEY from AWS Secrets Manager with fallback to settings.
-    
+
     Returns:
         Replicate API key string, or None if not found
     """
+    # Skip AWS Secrets Manager if USE_AWS_SECRETS is False (local development)
+    if not settings.USE_AWS_SECRETS:
+        logger.debug("USE_AWS_SECRETS=False, using REPLICATE_API_KEY from .env")
+        return settings.REPLICATE_API_KEY
+
     try:
         from app.services.secrets import get_secret
         return get_secret("pipeline/replicate-api-key")

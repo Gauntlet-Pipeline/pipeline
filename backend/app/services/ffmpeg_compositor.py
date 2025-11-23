@@ -31,16 +31,20 @@ class FFmpegCompositor:
     - Output 1080p final video
     """
 
-    def __init__(self, work_dir: Optional[str] = None):
+    def __init__(self, work_dir: Optional[str] = None, websocket_manager=None, session_id: Optional[str] = None):
         """
         Initialize FFmpeg compositor.
 
         Args:
             work_dir: Working directory for temporary files (default: system temp)
+            websocket_manager: Optional WebSocket manager for real-time updates
+            session_id: Optional session ID for WebSocket updates
         """
         self.work_dir = work_dir or tempfile.gettempdir()
         Path(self.work_dir).mkdir(parents=True, exist_ok=True)
-        self.video_verifier = VideoVerificationService()
+        self.websocket_manager = websocket_manager
+        self.session_id = session_id
+        self.video_verifier = VideoVerificationService(websocket_manager=websocket_manager, session_id=session_id)
 
         # Verify FFmpeg is installed
         try:

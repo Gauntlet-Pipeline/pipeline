@@ -34,18 +34,22 @@ class VideoGeneratorAgent:
     - Cost tracking per clip
     """
 
-    def __init__(self, replicate_api_key: str, storage_service: Optional[StorageService] = None):
+    def __init__(self, replicate_api_key: str, storage_service: Optional[StorageService] = None, websocket_manager=None, session_id: Optional[str] = None):
         """
         Initialize the Video Generator Agent.
 
         Args:
             replicate_api_key: Replicate API key for video generation
             storage_service: Optional storage service for S3 uploads (if not provided, will create one)
+            websocket_manager: Optional WebSocket manager for real-time updates
+            session_id: Optional session ID for WebSocket updates
         """
         self.api_key = replicate_api_key
         self.client = replicate.Client(api_token=replicate_api_key)
         self.storage_service = storage_service or StorageService()
-        self.video_verifier = VideoVerificationService()
+        self.websocket_manager = websocket_manager
+        self.session_id = session_id
+        self.video_verifier = VideoVerificationService(websocket_manager=websocket_manager, session_id=session_id)
 
         # Model configurations (Replicate model IDs)
         self.models = {
