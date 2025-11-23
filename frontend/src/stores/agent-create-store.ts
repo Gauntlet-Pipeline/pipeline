@@ -32,6 +32,7 @@ interface AgentCreateState {
   sessionStatus: string | null;
   thinkingStatus: ThinkingStatus;
   factsLocked: boolean;
+  narrationLocked: boolean;
   childAge: string | null;
   childInterest: string | null;
   showFactSelectionPrompt: boolean;
@@ -52,6 +53,7 @@ interface AgentCreateState {
   setSessionId: (id: string | null) => void;
   setThinkingStatus: (status: ThinkingStatus) => void;
   setFactsLocked: (locked: boolean) => void;
+  setNarrationLocked: (locked: boolean) => void;
   setChildInfo: (age: string, interest: string) => void;
   setShowFactSelectionPrompt: (show: boolean) => void;
   setShowNarrationReviewPrompt: (show: boolean) => void;
@@ -69,6 +71,7 @@ interface AgentCreateState {
   }) => void;
   extractFacts: (messagesToSend: Message[]) => Promise<void>;
   handleSubmitFacts: () => Promise<void>;
+  handleVerifyNarration: () => Promise<void>;
   handleSubmit: (message: {
     text: string;
     files: FileUIPart[];
@@ -220,6 +223,7 @@ export const useAgentCreateStore = create<AgentCreateState>()(
       sessionStatus: null,
       thinkingStatus: null,
       factsLocked: false,
+      narrationLocked: false,
       childAge: null,
       childInterest: null,
       showFactSelectionPrompt: false,
@@ -253,6 +257,7 @@ export const useAgentCreateStore = create<AgentCreateState>()(
       setSessionId: (id) => set({ sessionId: id }),
       setThinkingStatus: (status) => set({ thinkingStatus: status }),
       setFactsLocked: (locked) => set({ factsLocked: locked }),
+      setNarrationLocked: (locked) => set({ narrationLocked: locked }),
       setChildInfo: (age, interest) =>
         set({ childAge: age, childInterest: interest }),
       setShowFactSelectionPrompt: (show) =>
@@ -283,6 +288,7 @@ export const useAgentCreateStore = create<AgentCreateState>()(
           sessionStatus: null,
           thinkingStatus: null,
           factsLocked: false,
+          narrationLocked: false,
           childAge: null,
           childInterest: null,
           showFactSelectionPrompt: false,
@@ -487,6 +493,45 @@ export const useAgentCreateStore = create<AgentCreateState>()(
         }
       },
 
+      handleVerifyNarration: async () => {
+        const state = get();
+        if (!state.sessionId || !state.narration) return;
+
+        try {
+          state.setIsLoading(true);
+          state.setError(null);
+
+          const response = await fetch("/api/agent-create/session/narration", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: state.sessionId,
+              narration: state.narration,
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error("Failed to save narration changes");
+          }
+
+          // Lock the narration after successful save
+          state.setNarrationLocked(true);
+
+          // Add confirmation message
+          state.addMessage({
+            role: "assistant",
+            content:
+              "Narration verified and saved! You can now proceed to create the video.",
+            id: Date.now().toString(),
+          });
+        } catch (error) {
+          console.error("Failed to verify narration:", error);
+          state.setError(error as Error);
+        } finally {
+          state.setIsLoading(false);
+        }
+      },
+
       handleSubmit: async (message) => {
         if (!message.text.trim() && message.files.length === 0) return;
 
@@ -647,6 +692,7 @@ export const useAgentCreateStore = create<AgentCreateState>()(
             facts: extractedFacts,
             selectedFacts: confirmedFacts,
             narration: data.session.generatedScript ?? null,
+            narrationLocked: hasGeneratedScript,
             childAge: data.session.childAge ?? null,
             childInterest: data.session.childInterest ?? null,
             workflowStep: hasConfirmedFacts

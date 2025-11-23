@@ -3,6 +3,7 @@
 import { Message, MessageContent } from "@/components/ai-elements/message";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { CheckCircle2 } from "lucide-react";
 import type { Narration } from "@/types";
 
 interface NarrationReviewPromptProps {
@@ -10,10 +11,12 @@ interface NarrationReviewPromptProps {
   sessionStatus: string | null;
   selectedFactsCount: number;
   onSubmitVideo: () => void;
+  onVerifyNarration: () => void;
   isGeneratingVideo: boolean;
   videoSuccess: boolean;
   videoError: string | null;
   isLoading: boolean;
+  narrationLocked: boolean;
 }
 
 export function NarrationReviewPrompt({
@@ -21,10 +24,12 @@ export function NarrationReviewPrompt({
   sessionStatus,
   selectedFactsCount,
   onSubmitVideo,
+  onVerifyNarration,
   isGeneratingVideo,
   videoSuccess,
   videoError,
   isLoading,
+  narrationLocked,
 }: NarrationReviewPromptProps) {
   const showVideoButton =
     sessionStatus !== "video_generating" &&
@@ -58,12 +63,46 @@ export function NarrationReviewPrompt({
           </div>
           <p className="text-muted-foreground text-sm">
             You can review and edit the script on the right.
-            {showVideoButton &&
-              " When you're ready, you can proceed to generate the video."}
+            {!narrationLocked &&
+              " When you're satisfied, click 'Verify Changes' to lock it in."}
+            {narrationLocked &&
+              showVideoButton &&
+              " You can now proceed to generate the video."}
           </p>
 
-          {/* Only show Create Video button if video hasn't been started */}
-          {showVideoButton && (
+          {/* Show Verify button if not locked yet */}
+          {!narrationLocked && (
+            <Alert className="border-blue-200 bg-blue-50">
+              <AlertDescription>
+                <div className="flex w-full items-center justify-between">
+                  <span className="text-sm font-medium">
+                    Review your edits
+                  </span>
+                  <Button
+                    onClick={onVerifyNarration}
+                    size="sm"
+                    variant="default"
+                    disabled={isLoading}
+                  >
+                    {isLoading ? (
+                      <>
+                        <span className="mr-2 inline-block h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                        Saving...
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="mr-2 h-4 w-4" />
+                        Verify Changes
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {/* Only show Create Video button after verification */}
+          {narrationLocked && showVideoButton && (
             <Alert className="bg-primary/10">
               <AlertDescription>
                 <div className="flex w-full items-center justify-between">

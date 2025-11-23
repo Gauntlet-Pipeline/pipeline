@@ -100,11 +100,11 @@ export function DocumentEditor({ className, ...props }: DocumentEditorProps) {
         ? "edit-narration"
         : "edit";
 
-  // Show toggle buttons when both confirmed facts and script exist, or if admin
+  // Show toggle buttons when both confirmed facts and script exist
   const hasConfirmedFacts = selectedFacts.length > 0;
   const hasScript = narration !== null;
   const showToggleButtons =
-    (hasConfirmedFacts && hasScript && mode !== "select-facts") || isAdmin;
+    hasConfirmedFacts && hasScript && mode !== "select-facts";
 
   // Check if we have student info
   const hasStudentInfo = childAge ?? childInterest;
@@ -149,19 +149,19 @@ export function DocumentEditor({ className, ...props }: DocumentEditorProps) {
               <Video className="mr-2 size-4" />
               Video
             </Button>
-            {isAdmin && (
-              <Button
-                variant={viewMode === "debug" ? "default" : "ghost"}
-                size="sm"
-                onClick={() => setViewMode("debug")}
-                className="h-8"
-              >
-                <Settings className="mr-2 size-4" />
-                Debug
-              </Button>
-            )}
           </div>
         ) : null}
+        {isAdmin && (
+          <Button
+            variant={viewMode === "debug" ? "default" : "ghost"}
+            size="sm"
+            onClick={() => setViewMode("debug")}
+            className="h-8"
+          >
+            <Settings className="mr-2 size-4" />
+            Debug
+          </Button>
+        )}
         {isLoading && (
           <span className="text-muted-foreground ml-auto text-xs">
             Updating...

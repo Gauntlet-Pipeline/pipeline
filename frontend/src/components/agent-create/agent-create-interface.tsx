@@ -66,6 +66,8 @@ export function AgentCreateInterface({
     showFactSelectionPrompt,
     showNarrationReviewPrompt,
     handleSubmitFacts,
+    narrationLocked,
+    handleVerifyNarration,
   } = useAgentCreateStore();
 
   // Only use store data if it matches the expected session
@@ -125,6 +127,10 @@ export function AgentCreateInterface({
     }
   };
 
+  const onVerifyNarration = async () => {
+    await handleVerifyNarration();
+  };
+
   // Show loading skeleton when:
   // 1. Currently loading a session (isSessionLoading = true)
   // 2. OR we have an externalSessionId that doesn't match the store (about to load)
@@ -181,10 +187,12 @@ export function AgentCreateInterface({
                           sessionStatus={sessionStatus}
                           selectedFactsCount={selectedFacts.length}
                           onSubmitVideo={onSubmitVideo}
+                          onVerifyNarration={onVerifyNarration}
                           isGeneratingVideo={isGeneratingVideo}
                           videoSuccess={videoSuccess}
                           videoError={videoError}
                           isLoading={isLoading}
+                          narrationLocked={narrationLocked}
                         />
                       )}
                       {isGeneratingVideo && (
