@@ -1666,15 +1666,37 @@ class VideoGenerationOrchestrator:
                 session.completed_at = datetime.now()
                 db.commit()
 
+            # Prepare WebSocket payload data (will be sent and logged)
+            websocket_details = f"Educational video complete! Duration: {duration}s"
+            
             # Broadcast completion
             await self.websocket_manager.broadcast_status(
                 session_id,
                 status="completed",
                 progress=100,
-                details=f"Educational video complete! Duration: {duration}s"
+                details=websocket_details
             )
 
             logger.info(f"[{session_id}] Educational video composition complete: {video_url}")
+
+            # Log success to webhook_log with WebSocket payload structure
+            payload_data = {
+                "status": "video_complete",
+                "videoUrl": video_url,
+                "sessionId": session_id,
+                "details": websocket_details,
+                "duration": duration,
+                "segments_count": len(timeline_segments)
+            }
+            self._log_webhook_entry(
+                db=db,
+                sessionId=session_id,
+                event_type="video_complete",
+                video_url=video_url,
+                status="received",
+                payload=payload_data,
+                error_message=None
+            )
 
             return {
                 "status": "success",
@@ -1693,11 +1715,32 @@ class VideoGenerationOrchestrator:
                 session.status = "failed"
                 db.commit()
 
+            # Prepare WebSocket payload data (will be sent and logged)
+            websocket_details = f"Video composition failed: {str(e)}"
+            
             await self.websocket_manager.broadcast_status(
                 session_id,
                 status="error",
                 progress=0,
-                details=f"Video composition failed: {str(e)}"
+                details=websocket_details
+            )
+
+            # Log failure to webhook_log with WebSocket payload structure
+            error_payload = {
+                "status": "video_failed",
+                "sessionId": session_id,
+                "error": str(e),
+                "reason": f"Orchestrator failed to compose educational video: {type(e).__name__}",
+                "details": websocket_details
+            }
+            self._log_webhook_entry(
+                db=db,
+                sessionId=session_id,
+                event_type="video_failed",
+                video_url=None,
+                status="failed",
+                payload=error_payload,
+                error_message=str(e)
             )
 
             return {
@@ -2673,355 +2716,430 @@ class VideoGenerationOrchestrator:
         
         logger.info(f"[{session_id}] Starting hardcode video composition")
         
-        # Map segment numbers to parts
-        segment_to_part = {
-            1: "hook",
-            2: "concept",
-            3: "process",
-            4: "conclusion"
-        }
-        
-        # Organize data by part
-        successful_segments = image_result.data.get("successful_segments", [])
-        if not successful_segments:
-            raise ValueError("No successful image segments found. Cannot generate video without images.")
-        
-        if not segments:
-            raise ValueError("No segments provided. Cannot generate video without segment data.")
-        
-        audio_files_by_part = {}
-        for audio_file in audio_files:
-            part = audio_file.get("part")
-            if part and part != "music":
-                audio_files_by_part[part] = audio_file
-        
-        # Check if diagram exists (optional - will fallback to generated images)
-        diagram_url = None
-        if self.storage_service.file_exists(diagram_s3_key):
-            diagram_url = self.storage_service.generate_presigned_url(
-                diagram_s3_key,
-                expires_in=3600
-            )
-            logger.info(f"[{session_id}] Using diagram for video generation")
-        else:
-            logger.info(f"[{session_id}] No diagram found - will use generated images for video")
-        
-        # Generate video clips for each segment - PARALLEL PROCESSING
-        video_clips = []
-        total_video_cost = 0.0
-        total_segments_for_video = len(successful_segments)
-
-        if not self.video_generator:
-            raise ValueError("Video generator not initialized - check REPLICATE_API_KEY")
-
-        # Constants for video generation
-        CLIP_DURATION = 6.0  # gen-4-turbo generates 6-second clips
-
-        # Define async function for generating multiple related video clips for a segment
-        async def generate_segment_video_clips(segment_result, segment_index):
-            """Generate multiple related video clips for a segment to fill the audio duration."""
-            import time
-            import math
-
-            segment_num = segment_result.get("segment_number")
-            part = segment_to_part.get(segment_num)
-
-            if not part:
-                logger.warning(f"[{session_id}] Unknown segment number {segment_num}, skipping")
-                return None
-
-            # Get audio for this part
-            audio_file = audio_files_by_part.get(part)
-            if not audio_file:
-                logger.warning(f"[{session_id}] No audio file for {part}, skipping video generation")
-                return None
-
-            # Validate audio file has URL
-            audio_url = audio_file.get("url") or audio_file.get("presigned_url")
-            if not audio_url:
-                logger.warning(f"[{session_id}] Audio file for {part} has no URL, skipping video generation")
-                return None
-
-            # Get duration (ensure it's a float)
-            audio_duration = float(audio_file.get("duration", 10.0))
-
-            # Calculate how many 6-second clips we need
-            clips_needed = max(1, math.ceil(audio_duration / CLIP_DURATION))
-
-            logger.error(f"[{session_id}] [MULTI-CLIP DEBUG] {part}: audio_duration={audio_duration:.1f}s, CLIP_DURATION={CLIP_DURATION}s, clips_needed={clips_needed}")
-
-            # Get generated images
-            generated_images = segment_result.get("generated_images", [])
-
-            # Get segment data for narration text
-            segment_data = next((s for s in segments if s.get("number") == segment_num), None)
-            narration_text = segment_data.get("narrationtext", "") if segment_data else ""
-
-            # Determine base image to use
-            if diagram_url:
-                base_image_url = diagram_url
-                image_source = "diagram"
+        try:
+            # Map segment numbers to parts
+            segment_to_part = {
+                1: "hook",
+                2: "concept",
+                3: "process",
+                4: "conclusion"
+            }
+            
+            # Organize data by part
+            successful_segments = image_result.data.get("successful_segments", [])
+            if not successful_segments:
+                raise ValueError("No successful image segments found. Cannot generate video without images.")
+            
+            if not segments:
+                raise ValueError("No segments provided. Cannot generate video without segment data.")
+            
+            audio_files_by_part = {}
+            for audio_file in audio_files:
+                part = audio_file.get("part")
+                if part and part != "music":
+                    audio_files_by_part[part] = audio_file
+            
+            # Check if diagram exists (optional - will fallback to generated images)
+            diagram_url = None
+            if self.storage_service.file_exists(diagram_s3_key):
+                diagram_url = self.storage_service.generate_presigned_url(
+                    diagram_s3_key,
+                    expires_in=3600
+                )
+                logger.info(f"[{session_id}] Using diagram for video generation")
             else:
-                if not generated_images:
-                    logger.warning(f"[{session_id}] No diagram or generated images for {part}, skipping video generation")
+                logger.info(f"[{session_id}] No diagram found - will use generated images for video")
+            
+            # Generate video clips for each segment - PARALLEL PROCESSING
+            video_clips = []
+            total_video_cost = 0.0
+            total_segments_for_video = len(successful_segments)
+
+            if not self.video_generator:
+                raise ValueError("Video generator not initialized - check REPLICATE_API_KEY")
+
+            # Constants for video generation
+            CLIP_DURATION = 6.0  # gen-4-turbo generates 6-second clips
+
+            # Define async function for generating multiple related video clips for a segment
+            async def generate_segment_video_clips(segment_result, segment_index):
+                """Generate multiple related video clips for a segment to fill the audio duration."""
+                import time
+                import math
+
+                segment_num = segment_result.get("segment_number")
+                part = segment_to_part.get(segment_num)
+
+                if not part:
+                    logger.warning(f"[{session_id}] Unknown segment number {segment_num}, skipping")
                     return None
-                img_key = generated_images[0].get("s3_key")
-                if not img_key:
-                    logger.warning(f"[{session_id}] No valid image key for {part}, skipping video generation")
+
+                # Get audio for this part
+                audio_file = audio_files_by_part.get(part)
+                if not audio_file:
+                    logger.warning(f"[{session_id}] No audio file for {part}, skipping video generation")
                     return None
-                base_image_url = self.storage_service.generate_presigned_url(img_key, expires_in=3600)
-                image_source = "generated image"
 
-            logger.info(f"[{session_id}] Generating {clips_needed} video clips for {part} (segment {segment_num}, {audio_duration:.1f}s audio) using {image_source}")
+                # Validate audio file has URL
+                audio_url = audio_file.get("url") or audio_file.get("presigned_url")
+                if not audio_url:
+                    logger.warning(f"[{session_id}] Audio file for {part} has no URL, skipping video generation")
+                    return None
 
-            # Send WebSocket update before generating
-            start_time = time.time()
-            await self.websocket_manager.broadcast_status(
-                session_id,
-                status="generating_video_clip",
-                progress=85 + (segment_index * 3),
-                details=f"[{segment_index + 1}/{total_segments_for_video}] Generating {clips_needed} clips for {part.capitalize()}... (estimated {clips_needed * 60}-{clips_needed * 120}s)"
-            )
+                # Get duration (ensure it's a float)
+                audio_duration = float(audio_file.get("duration", 10.0))
 
-            # Generate related prompts for sequential clips
-            # Split narration into chunks for each clip to create a narrative flow
-            words = narration_text.split()
-            words_per_clip = max(1, len(words) // clips_needed) if words else 0
+                # Calculate how many 6-second clips we need
+                clips_needed = max(1, math.ceil(audio_duration / CLIP_DURATION))
 
-            clip_prompts = []
-            for i in range(clips_needed):
-                # Get portion of narration for this clip
-                start_word = i * words_per_clip
-                end_word = start_word + words_per_clip if i < clips_needed - 1 else len(words)
-                clip_narration = " ".join(words[start_word:end_word]) if words else ""
+                logger.error(f"[{session_id}] [MULTI-CLIP DEBUG] {part}: audio_duration={audio_duration:.1f}s, CLIP_DURATION={CLIP_DURATION}s, clips_needed={clips_needed}")
 
-                # Create progressive camera movements for visual continuity
-                camera_movements = [
-                    "slow zoom in, focusing on key details",
-                    "gentle pan across the content, revealing information",
-                    "smooth tracking shot following the visual flow",
-                    "gradual zoom out to show context and connections"
-                ]
-                camera_move = camera_movements[i % len(camera_movements)]
+                # Get generated images
+                generated_images = segment_result.get("generated_images", [])
 
-                # Build the prompt with continuity cues
-                if i == 0:
-                    prompt = f"Opening shot: {clip_narration}. {camera_move}. Educational style with clear visuals."
-                elif i == clips_needed - 1:
-                    prompt = f"Concluding shot: {clip_narration}. {camera_move}. Smooth transition to end."
+                # Get segment data for narration text
+                segment_data = next((s for s in segments if s.get("number") == segment_num), None)
+                narration_text = segment_data.get("narrationtext", "") if segment_data else ""
+
+                # Determine base image to use
+                if diagram_url:
+                    base_image_url = diagram_url
+                    image_source = "diagram"
                 else:
-                    prompt = f"Continuation: {clip_narration}. {camera_move}. Maintain visual flow from previous shot."
+                    if not generated_images:
+                        logger.warning(f"[{session_id}] No diagram or generated images for {part}, skipping video generation")
+                        return None
+                    img_key = generated_images[0].get("s3_key")
+                    if not img_key:
+                        logger.warning(f"[{session_id}] No valid image key for {part}, skipping video generation")
+                        return None
+                    base_image_url = self.storage_service.generate_presigned_url(img_key, expires_in=3600)
+                    image_source = "generated image"
 
-                clip_prompts.append(prompt)
+                logger.info(f"[{session_id}] Generating {clips_needed} video clips for {part} (segment {segment_num}, {audio_duration:.1f}s audio) using {image_source}")
 
-            # Generate all clips for this segment
-            generated_clips = []
-            total_clip_cost = 0.0
+                # Send WebSocket update before generating
+                start_time = time.time()
+                await self.websocket_manager.broadcast_status(
+                    session_id,
+                    status="generating_video_clip",
+                    progress=85 + (segment_index * 3),
+                    details=f"[{segment_index + 1}/{total_segments_for_video}] Generating {clips_needed} clips for {part.capitalize()}... (estimated {clips_needed * 60}-{clips_needed * 120}s)"
+                )
 
-            for clip_idx in range(clips_needed):
-                try:
-                    video_input = AgentInput(
-                        session_id=session_id,
-                        data={
-                            "approved_images": [{"url": base_image_url}],
-                            "video_prompt": clip_prompts[clip_idx],
-                            "clip_duration": CLIP_DURATION,
-                            "model": "gen-4-turbo",
-                            "user_id": user_id
-                        }
-                    )
+                # Generate related prompts for sequential clips
+                # Split narration into chunks for each clip to create a narrative flow
+                words = narration_text.split()
+                words_per_clip = max(1, len(words) // clips_needed) if words else 0
 
-                    clip_result = await self.video_generator.process(video_input)
+                clip_prompts = []
+                for i in range(clips_needed):
+                    # Get portion of narration for this clip
+                    start_word = i * words_per_clip
+                    end_word = start_word + words_per_clip if i < clips_needed - 1 else len(words)
+                    clip_narration = " ".join(words[start_word:end_word]) if words else ""
 
-                    if clip_result.success and clip_result.data.get("clips"):
-                        clip_data = clip_result.data["clips"][0]
-                        generated_clips.append({
-                            "url": clip_data["url"],
-                            "duration": CLIP_DURATION,
-                            "cost": clip_result.cost
-                        })
-                        total_clip_cost += clip_result.cost
-                        logger.info(f"[{session_id}] Generated clip {clip_idx + 1}/{clips_needed} for {part}")
+                    # Create progressive camera movements for visual continuity
+                    camera_movements = [
+                        "slow zoom in, focusing on key details",
+                        "gentle pan across the content, revealing information",
+                        "smooth tracking shot following the visual flow",
+                        "gradual zoom out to show context and connections"
+                    ]
+                    camera_move = camera_movements[i % len(camera_movements)]
+
+                    # Build the prompt with continuity cues
+                    if i == 0:
+                        prompt = f"Opening shot: {clip_narration}. {camera_move}. Educational style with clear visuals."
+                    elif i == clips_needed - 1:
+                        prompt = f"Concluding shot: {clip_narration}. {camera_move}. Smooth transition to end."
                     else:
-                        error_msg = clip_result.error or "Unknown error"
-                        logger.warning(f"[{session_id}] Clip {clip_idx + 1}/{clips_needed} failed for {part}: {error_msg}")
+                        prompt = f"Continuation: {clip_narration}. {camera_move}. Maintain visual flow from previous shot."
 
-                except Exception as e:
-                    error_details = str(e) if str(e) else f"{type(e).__name__} occurred"
-                    logger.error(f"[{session_id}] Exception generating clip {clip_idx + 1}/{clips_needed} for {part}: {error_details}")
+                    clip_prompts.append(prompt)
 
-            generation_time = time.time() - start_time
+                # Generate all clips for this segment
+                generated_clips = []
+                total_clip_cost = 0.0
 
-            if generated_clips:
-                # Return info with multiple video URLs
-                clip_info = {
-                    "part": part,
-                    "video_urls": [c["url"] for c in generated_clips],  # Multiple URLs
-                    "video_url": generated_clips[0]["url"],  # Keep single URL for compatibility
-                    "audio_url": audio_url,
-                    "duration": audio_duration,
-                    "actual_video_duration": len(generated_clips) * CLIP_DURATION,
-                    "narration_duration": audio_duration,
-                    "gap_after_narration": 0.0,
-                    "script_text": narration_text,
-                    "cost": total_clip_cost,
-                    "clips_count": len(generated_clips)
-                }
+                for clip_idx in range(clips_needed):
+                    try:
+                        video_input = AgentInput(
+                            session_id=session_id,
+                            data={
+                                "approved_images": [{"url": base_image_url}],
+                                "video_prompt": clip_prompts[clip_idx],
+                                "clip_duration": CLIP_DURATION,
+                                "model": "gen-4-turbo",
+                                "user_id": user_id
+                            }
+                        )
 
-                logger.error(f"[{session_id}] [MULTI-CLIP DEBUG] {part}: Successfully generated {len(generated_clips)} clips, video_urls has {len(clip_info['video_urls'])} URLs")
+                        clip_result = await self.video_generator.process(video_input)
 
-                # Send success notification
-                await self.websocket_manager.broadcast_status(
-                    session_id,
-                    status="video_clip_completed",
-                    progress=85 + ((segment_index + 1) * 3),
-                    details=f"✓ [{segment_index + 1}/{total_segments_for_video}] {len(generated_clips)} clips for {part.capitalize()} generated in {generation_time:.1f}s"
-                )
+                        if clip_result.success and clip_result.data.get("clips"):
+                            clip_data = clip_result.data["clips"][0]
+                            generated_clips.append({
+                                "url": clip_data["url"],
+                                "duration": CLIP_DURATION,
+                                "cost": clip_result.cost
+                            })
+                            total_clip_cost += clip_result.cost
+                            logger.info(f"[{session_id}] Generated clip {clip_idx + 1}/{clips_needed} for {part}")
+                        else:
+                            error_msg = clip_result.error or "Unknown error"
+                            logger.warning(f"[{session_id}] Clip {clip_idx + 1}/{clips_needed} failed for {part}: {error_msg}")
 
-                logger.info(f"[{session_id}] ✓ Generated {len(generated_clips)} clips for {part} in {generation_time:.1f}s (${total_clip_cost:.3f})")
-                return clip_info
-            else:
-                # All clips failed - use fallback
-                logger.error(f"[{session_id}] All clips failed for {part}, using fallback")
+                    except Exception as e:
+                        error_details = str(e) if str(e) else f"{type(e).__name__} occurred"
+                        logger.error(f"[{session_id}] Exception generating clip {clip_idx + 1}/{clips_needed} for {part}: {error_details}")
 
-                # Send WebSocket notification about video generation failure
-                await self.websocket_manager.broadcast_status(
-                    session_id,
-                    status="warning",
-                    progress=85 + ((segment_index + 1) * 3),
-                    details=f"⚠ [{segment_index + 1}/{total_segments_for_video}] Video generation failed for {part}, using static image fallback"
-                )
+                generation_time = time.time() - start_time
 
-                # Fallback: use static image (diagram or first generated image)
-                fallback_image_key = diagram_s3_key if diagram_url else (generated_images[0].get("s3_key") if generated_images else None)
-                if fallback_image_key:
-                    image_url = self.storage_service.generate_presigned_url(
-                        fallback_image_key,
-                        expires_in=3600
-                    )
-                    return {
+                if generated_clips:
+                    # Return info with multiple video URLs
+                    clip_info = {
                         "part": part,
-                        "video_url": None,  # Will be created from static image
-                        "image_url": image_url,
+                        "video_urls": [c["url"] for c in generated_clips],  # Multiple URLs
+                        "video_url": generated_clips[0]["url"],  # Keep single URL for compatibility
                         "audio_url": audio_url,
                         "duration": audio_duration,
+                        "actual_video_duration": len(generated_clips) * CLIP_DURATION,
                         "narration_duration": audio_duration,
                         "gap_after_narration": 0.0,
                         "script_text": narration_text,
-                        "cost": 0.0
+                        "cost": total_clip_cost,
+                        "clips_count": len(generated_clips)
                     }
-                else:
-                    logger.error(f"[{session_id}] No fallback image available for {part}")
+
+                    logger.error(f"[{session_id}] [MULTI-CLIP DEBUG] {part}: Successfully generated {len(generated_clips)} clips, video_urls has {len(clip_info['video_urls'])} URLs")
+
+                    # Send success notification
                     await self.websocket_manager.broadcast_status(
                         session_id,
-                        status="error",
+                        status="video_clip_completed",
                         progress=85 + ((segment_index + 1) * 3),
-                        details=f"❌ [{segment_index + 1}/{total_segments_for_video}] Video generation failed for {part} and no fallback image available"
+                        details=f"✓ [{segment_index + 1}/{total_segments_for_video}] {len(generated_clips)} clips for {part.capitalize()} generated in {generation_time:.1f}s"
                     )
-                    return None
 
-        # Send initial notification about parallel video generation
-        await self.websocket_manager.broadcast_status(
-            session_id,
-            status="generating_videos_parallel",
-            progress=85,
-            details=f"Generating {total_segments_for_video} video clips in parallel... (estimated {total_segments_for_video * 30}-{total_segments_for_video * 40}s total)"
-        )
+                    logger.info(f"[{session_id}] ✓ Generated {len(generated_clips)} clips for {part} in {generation_time:.1f}s (${total_clip_cost:.3f})")
+                    return clip_info
+                else:
+                    # All clips failed - use fallback
+                    logger.error(f"[{session_id}] All clips failed for {part}, using fallback")
 
-        # Generate all video clips in parallel using asyncio.gather
-        logger.info(f"[{session_id}] Starting parallel video generation for {total_segments_for_video} segments")
-        tasks = []
-        for i, segment_result in enumerate(successful_segments):
-            task = generate_segment_video_clips(segment_result, i)
-            tasks.append(task)
+                    # Send WebSocket notification about video generation failure
+                    await self.websocket_manager.broadcast_status(
+                        session_id,
+                        status="warning",
+                        progress=85 + ((segment_index + 1) * 3),
+                        details=f"⚠ [{segment_index + 1}/{total_segments_for_video}] Video generation failed for {part}, using static image fallback"
+                    )
 
-        # Execute all video generation tasks in parallel
-        video_clip_results = await asyncio.gather(*tasks, return_exceptions=True)
+                    # Fallback: use static image (diagram or first generated image)
+                    fallback_image_key = diagram_s3_key if diagram_url else (generated_images[0].get("s3_key") if generated_images else None)
+                    if fallback_image_key:
+                        image_url = self.storage_service.generate_presigned_url(
+                            fallback_image_key,
+                            expires_in=3600
+                        )
+                        return {
+                            "part": part,
+                            "video_url": None,  # Will be created from static image
+                            "image_url": image_url,
+                            "audio_url": audio_url,
+                            "duration": audio_duration,
+                            "narration_duration": audio_duration,
+                            "gap_after_narration": 0.0,
+                            "script_text": narration_text,
+                            "cost": 0.0
+                        }
+                    else:
+                        logger.error(f"[{session_id}] No fallback image available for {part}")
+                        await self.websocket_manager.broadcast_status(
+                            session_id,
+                            status="error",
+                            progress=85 + ((segment_index + 1) * 3),
+                            details=f"❌ [{segment_index + 1}/{total_segments_for_video}] Video generation failed for {part} and no fallback image available"
+                        )
+                        return None
 
-        # Process results and collect successful clips
-        for i, result in enumerate(video_clip_results):
-            if isinstance(result, Exception):
-                error_msg = str(result) if str(result) else f"{type(result).__name__} occurred"
-                logger.error(f"[{session_id}] Video clip task {i+1} raised exception: {error_msg}")
-                continue
+            # Send initial notification about parallel video generation
+            await self.websocket_manager.broadcast_status(
+                session_id,
+                status="generating_videos_parallel",
+                progress=85,
+                details=f"Generating {total_segments_for_video} video clips in parallel... (estimated {total_segments_for_video * 30}-{total_segments_for_video * 40}s total)"
+            )
 
-            if result is not None:
-                video_clips.append(result)
-                total_video_cost += result.get("cost", 0.0)
-        
-        if not video_clips:
-            raise ValueError("No video clips generated")
-        
-        # Compose final video using EducationalCompositor
-        logger.info(f"[{session_id}] Composing final video from {len(video_clips)} clips")
-        
-        await self.websocket_manager.broadcast_status(
-            session_id,
-            status="composing_final_video",
-            progress=95,
-            details="Composing final video with FFmpeg..."
-        )
-        
-        if not self.ffmpeg_compositor:
-            raise ValueError("FFmpeg compositor not available")
-        
-        # Use EducationalCompositor for final composition
-        compositor = EducationalCompositor(work_dir="/tmp/educational_videos")
-        
-        # Get music URL if available
-        music_url = None
-        for audio_file in audio_files:
-            if audio_file.get("part") == "music":
-                music_url = audio_file.get("url")
-                break
-        
-        final_video_result = await compositor.compose_educational_video(
-            timeline=video_clips,
-            music_url=music_url,
-            session_id=session_id,
-            intro_padding=2.0,
-            outro_padding=2.0
-        )
-        
-        # Upload final video to S3
-        final_video_s3_key = self.storage_service.get_session_path(user_id, session_id, "final", "final_video.mp4")
-        
-        # Download final video from compositor result
-        final_video_path = final_video_result.get("output_path")
-        if final_video_path and os.path.exists(final_video_path):
-            with open(final_video_path, "rb") as f:
-                video_bytes = f.read()
+            # Generate all video clips in parallel using asyncio.gather
+            logger.info(f"[{session_id}] Starting parallel video generation for {total_segments_for_video} segments")
+            tasks = []
+            for i, segment_result in enumerate(successful_segments):
+                task = generate_segment_video_clips(segment_result, i)
+                tasks.append(task)
+
+            # Execute all video generation tasks in parallel
+            video_clip_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process results and collect successful clips
+            for i, result in enumerate(video_clip_results):
+                if isinstance(result, Exception):
+                    error_msg = str(result) if str(result) else f"{type(result).__name__} occurred"
+                    logger.error(f"[{session_id}] Video clip task {i+1} raised exception: {error_msg}")
+                    continue
+
+                if result is not None:
+                    video_clips.append(result)
+                    total_video_cost += result.get("cost", 0.0)
             
-            self.storage_service.upload_file_direct(
-                video_bytes,
-                final_video_s3_key,
-                content_type="video/mp4"
+            if not video_clips:
+                raise ValueError("No video clips generated")
+            
+            # Compose final video using EducationalCompositor
+            logger.info(f"[{session_id}] Composing final video from {len(video_clips)} clips")
+            
+            await self.websocket_manager.broadcast_status(
+                session_id,
+                status="composing_final_video",
+                progress=95,
+                details="Composing final video with FFmpeg..."
             )
             
-            # Generate presigned URL
-            final_video_url = self.storage_service.generate_presigned_url(
-                final_video_s3_key,
-                expires_in=86400  # 24 hours
+            if not self.ffmpeg_compositor:
+                raise ValueError("FFmpeg compositor not available")
+            
+            # Use EducationalCompositor for final composition
+            compositor = EducationalCompositor(work_dir="/tmp/educational_videos")
+            
+            # Get music URL if available
+            music_url = None
+            for audio_file in audio_files:
+                if audio_file.get("part") == "music":
+                    music_url = audio_file.get("url")
+                    break
+            
+            final_video_result = await compositor.compose_educational_video(
+                timeline=video_clips,
+                music_url=music_url,
+                session_id=session_id,
+                intro_padding=2.0,
+                outro_padding=2.0
             )
             
-            # Clean up local file
+            # Upload final video to S3
+            final_video_s3_key = self.storage_service.get_session_path(user_id, session_id, "final", "final_video.mp4")
+            
+            # Download final video from compositor result
+            final_video_path = final_video_result.get("output_path")
+            if final_video_path and os.path.exists(final_video_path):
+                with open(final_video_path, "rb") as f:
+                    video_bytes = f.read()
+                
+                self.storage_service.upload_file_direct(
+                    video_bytes,
+                    final_video_s3_key,
+                    content_type="video/mp4"
+                )
+                
+                # Generate presigned URL
+                final_video_url = self.storage_service.generate_presigned_url(
+                    final_video_s3_key,
+                    expires_in=86400  # 24 hours
+                )
+                
+                # Clean up local file
+                try:
+                    os.remove(final_video_path)
+                except:
+                    pass
+                
+                logger.info(f"[{session_id}] Final video uploaded to {final_video_s3_key}")
+            else:
+                raise ValueError("Final video file not found after composition")
+            
+            # Log success to webhook_log (construct payload from return values)
+            # Note: compose_hardcode_video doesn't receive db parameter, so we'll need to handle that
+            # For now, we'll log without db if not available
+            payload_data = {
+                "status": "video_complete",
+                "videoUrl": final_video_url,
+                "sessionId": session_id,
+                "final_video_s3_key": final_video_s3_key,
+                "video_clips_count": len(video_clips),
+                "total_cost": total_video_cost,
+                "duration": final_video_result.get("duration", 0.0)
+            }
+            # Try to get db from context or create a temporary session
+            log_db = None
             try:
-                os.remove(final_video_path)
-            except:
-                pass
+                # Check if db is available in the method signature (it's not, so we'll create one)
+                from app.database import SessionLocal
+                log_db = SessionLocal()
+            except Exception:
+                log_db = None
             
-            logger.info(f"[{session_id}] Final video uploaded to {final_video_s3_key}")
-        else:
-            raise ValueError("Final video file not found after composition")
+            if log_db is not None:
+                try:
+                    self._log_webhook_entry(
+                        db=log_db,
+                        sessionId=session_id,
+                        event_type="video_complete",
+                        video_url=final_video_url,
+                        status="received",
+                        payload=payload_data,
+                        error_message=None
+                    )
+                finally:
+                    log_db.close()
+            else:
+                logger.warning(f"[{session_id}] Could not log webhook entry - no database session available")
+            
+            return {
+                "status": "success",
+                "final_video_s3_key": final_video_s3_key,
+                "final_video_url": final_video_url,
+                "video_clips_count": len(video_clips),
+                "total_cost": total_video_cost,
+                "duration": final_video_result.get("duration", 0.0)
+            }
         
-        return {
-            "status": "success",
-            "final_video_s3_key": final_video_s3_key,
-            "final_video_url": final_video_url,
-            "video_clips_count": len(video_clips),
-            "total_cost": total_video_cost,
-            "duration": final_video_result.get("duration", 0.0)
-        }
+        except Exception as e:
+            logger.error(f"[{session_id}] Hardcode video composition failed: {e}", exc_info=True)
+            
+            # Log failure to webhook_log
+            error_payload = {
+                "status": "video_failed",
+                "sessionId": session_id,
+                "error": str(e),
+                "reason": f"Orchestrator failed to compose hardcode video: {type(e).__name__}"
+            }
+            
+            # Try to get db from context or create a temporary session
+            log_db = None
+            try:
+                from app.database import SessionLocal
+                log_db = SessionLocal()
+            except Exception:
+                log_db = None
+            
+            if log_db is not None:
+                try:
+                    self._log_webhook_entry(
+                        db=log_db,
+                        sessionId=session_id,
+                        event_type="video_failed",
+                        video_url=None,
+                        status="failed",
+                        payload=error_payload,
+                        error_message=str(e)
+                    )
+                finally:
+                    log_db.close()
+            else:
+                logger.warning(f"[{session_id}] Could not log webhook entry for error - no database session available")
+            
+            raise
 
     def _log_webhook_entry(
         self,
@@ -3459,12 +3577,33 @@ class VideoGenerationOrchestrator:
                 # Extract video URL from Agent5 result
                 video_url = agent5_result if isinstance(agent5_result, str) else None
                 
+                # Prepare WebSocket payload data (will be sent and logged)
+                websocket_payload = {
+                    "message": "Full Test process completed successfully",
+                    "videoUrl": video_url,
+                    "agent2Result": agent2_result,
+                    "agent4Result": agent4_result,
+                    "agent5Result": agent5_result
+                }
+                
+                # Send orchestrator finished status with video link and all info
+                await self._send_orchestrator_status(
+                    userId, sessionId, "finished",
+                    websocket_payload
+                )
+                
                 # Update webhook_log table in database if video URL is available
+                # Capture the full WebSocket payload structure that was sent
                 if video_url:
+                    # Build payload matching WebSocket structure
                     payload_data = {
                         "status": "video_complete",
                         "videoUrl": video_url,
-                        "sessionId": sessionId
+                        "sessionId": sessionId,
+                        "message": websocket_payload.get("message"),
+                        "agent2Result": websocket_payload.get("agent2Result"),
+                        "agent4Result": websocket_payload.get("agent4Result"),
+                        "agent5Result": websocket_payload.get("agent5Result")
                     }
                     self._log_webhook_entry(
                         db=db,
@@ -3475,18 +3614,6 @@ class VideoGenerationOrchestrator:
                         payload=payload_data,
                         error_message=None
                     )
-                
-                # Send orchestrator finished status with video link and all info
-                await self._send_orchestrator_status(
-                    userId, sessionId, "finished",
-                    {
-                        "message": "Full Test process completed successfully",
-                        "videoUrl": video_url,
-                        "agent2Result": agent2_result,
-                        "agent4Result": agent4_result,
-                        "agent5Result": agent5_result
-                    }
-                )
                 
                 logger.info(f"Full Test process completed successfully for session {sessionId}")
                 
@@ -3517,6 +3644,52 @@ class VideoGenerationOrchestrator:
                 )
                 raise
                 
+        except asyncio.CancelledError:
+            logger.warning(f"Orchestrator cancelled in start_full_test_process for session {sessionId}")
+            
+            # Log cancellation to webhook_log
+            try:
+                error_payload = {
+                    "status": "video_failed",
+                    "sessionId": sessionId,
+                    "error": "Video generation was cancelled",
+                    "reason": "Orchestrator cancelled externally",
+                    "failedStage": "orchestrator"
+                }
+                # Try to use db if available, or create a temporary session for logging
+                log_db = db
+                if log_db is None:
+                    try:
+                        from app.database import SessionLocal
+                        log_db = SessionLocal()
+                    except Exception:
+                        log_db = None
+                
+                if log_db is not None:
+                    self._log_webhook_entry(
+                        db=log_db,
+                        sessionId=sessionId,
+                        event_type="video_failed",
+                        video_url=None,
+                        status="failed",
+                        payload=error_payload,
+                        error_message="Video generation was cancelled"
+                    )
+                    # Close temporary session if we created it
+                    if db is None and log_db:
+                        log_db.close()
+            except Exception as log_error:
+                logger.error(f"Failed to log orchestrator cancellation to webhook_log: {log_error}")
+            
+            # Try to send cancellation status (may fail if WebSocket is down)
+            try:
+                await self._send_orchestrator_status(
+                    userId, sessionId, "error",
+                    {"error": "Video generation was cancelled", "reason": "Orchestrator cancelled externally"}
+                )
+            except:
+                pass
+            raise
         except Exception as e:
             logger.exception(f"Orchestrator error in start_full_test_process: {e}")
             
