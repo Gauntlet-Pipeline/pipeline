@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { Fact, Narration } from "@/types";
+import type { Fact, Narration, AgentSessionResponse } from "@/types";
 import { parseToolResult } from "@/lib/ai-utils";
 import type { FileUIPart } from "ai";
 
@@ -296,7 +296,7 @@ export const useAgentCreateStore = create<AgentCreateState>()(
       },
 
       handleFactExtractionResponse: (json) => {
-        if (json.facts) {
+        if (json.facts && json.facts.length > 0) {
           set({
             facts: json.facts,
             workflowStep: "selection",
@@ -307,6 +307,15 @@ export const useAgentCreateStore = create<AgentCreateState>()(
             content:
               json.message ??
               "I've extracted these facts. Please select the ones you want to keep.",
+            id: Date.now().toString(),
+          });
+        } else if (json.facts?.length === 0) {
+          // No facts found, stay in input mode
+          get().addMessage({
+            role: "assistant",
+            content:
+              json.message ??
+              "I couldn't find any facts in the provided content. Please try providing more detailed educational content or a different source.",
             id: Date.now().toString(),
           });
         }
@@ -326,13 +335,27 @@ export const useAgentCreateStore = create<AgentCreateState>()(
             ],
           });
 
+          // Convert messages to include files as parts for proper storage
+          const apiMessages = messagesToSend.map((msg) => {
+            if (!msg.files || msg.files.length === 0) {
+              return { role: msg.role, content: msg.content };
+            }
+
+            // Include parts for messages with file attachments
+            return {
+              role: msg.role,
+              content: msg.content,
+              parts: msg.files,
+            };
+          });
+
           const response = await fetch("/api/agent-create/tools", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              messages: messagesToSend,
+              messages: apiMessages,
               sessionId: state.sessionId,
             }),
           });
@@ -345,6 +368,13 @@ export const useAgentCreateStore = create<AgentCreateState>()(
 
           const jsonData = await parseJsonResponse(response);
 
+          // Development-only logging
+          if (process.env.NODE_ENV === "development") {
+            console.groupCollapsed("✨ Facts Extraction Response");
+            console.log("Response Data:", jsonData);
+            console.groupEnd();
+          }
+
           // Parse the response
           if (parseToolResponse(jsonData, state)) {
             state.setThinkingStatus(null);
@@ -356,6 +386,8 @@ export const useAgentCreateStore = create<AgentCreateState>()(
           console.error("Failed to extract facts", e);
           state.setError(e as Error);
           state.setThinkingStatus(null);
+          // Reset to input mode so user can try again
+          state.setWorkflowStep("input");
           throw e;
         } finally {
           state.setIsLoading(false);
@@ -390,13 +422,27 @@ export const useAgentCreateStore = create<AgentCreateState>()(
         state.addMessage(confirmationMessage);
 
         try {
+          // Convert messages to include files as parts for proper storage
+          const apiMessages = messagesWithConfirmation.map((msg) => {
+            if (!msg.files || msg.files.length === 0) {
+              return { role: msg.role, content: msg.content };
+            }
+
+            // Include parts for messages with file attachments
+            return {
+              role: msg.role,
+              content: msg.content,
+              parts: msg.files,
+            };
+          });
+
           const response = await fetch("/api/agent-create/tools", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              messages: messagesWithConfirmation,
+              messages: apiMessages,
               selectedFacts: state.selectedFacts,
               sessionId: state.sessionId,
             }),
@@ -409,6 +455,13 @@ export const useAgentCreateStore = create<AgentCreateState>()(
           }
 
           const jsonData = await parseJsonResponse(response);
+
+          // Development-only logging
+          if (process.env.NODE_ENV === "development") {
+            console.groupCollapsed("📝 Narration Generation Response");
+            console.log("Response Data:", jsonData);
+            console.groupEnd();
+          }
 
           // Parse the response
           if (parseToolResponse(jsonData, state)) {
@@ -495,6 +548,12 @@ export const useAgentCreateStore = create<AgentCreateState>()(
             // Reset state for new extraction
             state.reset();
             await state.extractFacts(newMessages);
+          } else if (state.workflowStep === "selection") {
+            // User is trying to add more content while in selection mode
+            // Reset and start over with new content
+            state.reset();
+            state.setMessages(newMessages);
+            await state.extractFacts(newMessages);
           }
         } catch (e) {
           console.error("Chat error:", e);
@@ -524,24 +583,58 @@ export const useAgentCreateStore = create<AgentCreateState>()(
             throw new Error(`Failed to load session: ${response.status}`);
           }
 
-          const data = await response.json();
+          const data = (await parseJsonResponse(
+            response,
+          )) as AgentSessionResponse;
+
+          // Development-only client-side logging
+          if (process.env.NODE_ENV === "development") {
+            console.groupCollapsed("📦 Session Data Loaded");
+            console.log("Session ID:", data.session.id);
+            console.log("Status:", data.session.status);
+            console.log("Messages:", data.messages);
+            console.log("Extracted Facts:", data.session.extractedFacts);
+            console.log("Confirmed Facts:", data.session.confirmedFacts);
+            console.log("Generated Script:", data.session.generatedScript);
+            console.log("Child Age:", data.session.childAge);
+            console.log("Child Interest:", data.session.childInterest);
+            console.log("Full Response:", data);
+            console.groupEnd();
+          }
 
           // Restore state from DB
-          const extractedFacts = (data.session.extractedFacts as Fact[]) ?? [];
-          const confirmedFacts = (data.session.confirmedFacts as Fact[]) ?? [];
+          const extractedFacts = data.session.extractedFacts ?? [];
+          const confirmedFacts = data.session.confirmedFacts ?? [];
           const hasExtractedFacts = extractedFacts.length > 0;
           const hasConfirmedFacts = confirmedFacts.length > 0;
           const hasGeneratedScript = !!data.session.generatedScript;
 
           set({
             sessionId: data.session.id,
-            messages: data.messages.map(
-              (m: { role: string; content: string; id: string }) => ({
+            messages: data.messages.map((m) => {
+              const message: Message = {
                 role: m.role as "user" | "assistant",
                 content: m.content,
                 id: m.id,
-              }),
-            ),
+              };
+
+              // Extract files from parts if present
+              if (m.parts && Array.isArray(m.parts)) {
+                const files = m.parts.filter(
+                  (part: unknown) =>
+                    typeof part === "object" &&
+                    part !== null &&
+                    "type" in part &&
+                    part.type === "file",
+                ) as FileUIPart[];
+
+                if (files.length > 0) {
+                  message.files = files;
+                }
+              }
+
+              return message;
+            }),
             facts: extractedFacts,
             selectedFacts: confirmedFacts,
             narration: data.session.generatedScript ?? null,
@@ -554,6 +647,9 @@ export const useAgentCreateStore = create<AgentCreateState>()(
               : hasExtractedFacts
                 ? "selection" // If facts exist but aren't confirmed, allow selection
                 : "input",
+            // Set UI prompt flags based on session state
+            showFactSelectionPrompt: hasExtractedFacts && !hasConfirmedFacts,
+            showNarrationReviewPrompt: hasGeneratedScript,
           });
         } catch (error) {
           console.error("Failed to load session:", error);

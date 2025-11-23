@@ -119,3 +119,27 @@ export interface Narration {
   key_terms_count: number;
   segments: NarrationSegment[];
 }
+
+// Agent session API response types
+export interface AgentSessionMessage {
+  role: string;
+  content: string;
+  id: string;
+  parts?: unknown;
+}
+
+export interface AgentSessionData {
+  id: string;
+  status: string;
+  extractedFacts: Fact[] | null;
+  confirmedFacts: Fact[] | null;
+  generatedScript: Narration | null;
+  topic: string | null;
+  childAge: string | null;
+  childInterest: string | null;
+}
+
+export interface AgentSessionResponse {
+  session: AgentSessionData;
+  messages: AgentSessionMessage[];
+}

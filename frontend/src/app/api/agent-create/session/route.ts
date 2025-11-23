@@ -1,8 +1,7 @@
 import { auth } from "@/server/auth";
 import { db } from "@/server/db";
-import { videoSessions } from "@/server/db/schema";
-import { eq } from "drizzle-orm";
-import { loadConversationMessages } from "@/server/utils/message-utils";
+import { videoSessions, conversationMessages } from "@/server/db/schema";
+import { eq, asc } from "drizzle-orm";
 
 export async function GET(req: Request) {
   const session = await auth();
@@ -29,8 +28,12 @@ export async function GET(req: Request) {
       return new Response("Session not found", { status: 404 });
     }
 
-    // Load conversation messages
-    const messages = await loadConversationMessages(sessionId);
+    // Load conversation messages directly from database to preserve parts
+    const dbMessages = await db
+      .select()
+      .from(conversationMessages)
+      .where(eq(conversationMessages.sessionId, sessionId))
+      .orderBy(asc(conversationMessages.createdAt));
 
     return Response.json({
       session: {
@@ -43,10 +46,11 @@ export async function GET(req: Request) {
         childAge: sessionData.childAge,
         childInterest: sessionData.childInterest,
       },
-      messages: messages.map((m) => ({
+      messages: dbMessages.map((m) => ({
         role: m.role,
-        content: typeof m.content === "string" ? m.content : "",
-        id: `${m.role}-${Date.now()}-${Math.random()}`,
+        content: m.content,
+        id: m.id,
+        parts: m.parts ?? undefined, // Include parts if they exist (for file attachments)
       })),
     });
   } catch (error) {
