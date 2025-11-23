@@ -29,11 +29,12 @@ export async function PATCH(req: Request) {
       return new Response("Session not found", { status: 404 });
     }
 
-    // Update the generated script with edited version
+    // Update the generated script with edited version and mark as verified
     await db
       .update(videoSessions)
       .set({
         generatedScript: body.narration,
+        status: "narration_verified",
         updatedAt: new Date(),
       })
       .where(eq(videoSessions.id, body.sessionId));
