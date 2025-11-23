@@ -1,7 +1,21 @@
 import { openai } from "@ai-sdk/openai";
-import { generateText } from "ai";
+import { generateObject } from "ai";
+import { z } from "zod";
 import { env } from "@/env";
 import type { AgentInput, AgentOutput } from "@/types/agent";
+
+const factExtractionSchema = z.object({
+  facts: z.array(
+    z.object({
+      concept: z.string(),
+      details: z.string(),
+      confidence: z.number().min(0).max(1),
+    }),
+  ),
+  topic: z.string(),
+  learningObjective: z.string(),
+  message: z.string(),
+});
 
 export class FactExtractionAgent {
   async process(input: AgentInput): Promise<AgentOutput> {
@@ -12,46 +26,65 @@ export class FactExtractionAgent {
         throw new Error("OPENAI_API_KEY is not configured");
       }
 
-      const content = input.data.content as string;
-      if (!content || content.trim().length === 0) {
-        throw new Error("Content is required for fact extraction");
+      const content = input.data.content as string | undefined;
+      const pdfUrl = input.data.pdfUrl as string | undefined;
+
+      // Either content or pdfUrl must be provided
+      if ((!content || content.trim().length === 0) && !pdfUrl) {
+        throw new Error(
+          "Either content or PDF URL is required for fact extraction",
+        );
       }
+
+      console.log("content   ===>", content);
+      console.log("pdfUrl    ===>", pdfUrl);
 
       const systemPrompt = this.buildSystemPrompt();
-      const userPrompt = this.buildUserPrompt(content);
+      const userPrompt = this.buildUserPrompt(content ?? "");
 
-      const result = await generateText({
-        model: openai("gpt-4o-mini"),
-        system: systemPrompt,
-        prompt: userPrompt,
-        temperature: 0.7,
-      });
+      // Build message content array
+      const messageContent: Array<
+        | { type: "text"; text: string }
+        | { type: "file"; data: string; mediaType: string }
+      > = [
+        {
+          type: "text",
+          text: userPrompt,
+        },
+      ];
 
-      const responseText = result.text;
-      if (!responseText) {
-        throw new Error("No content in LLM response");
+      // If PDF URL is provided, fetch and add it
+      if (pdfUrl) {
+        try {
+          const pdfDataUrl = await this.fetchPdfAsDataUrl(pdfUrl);
+          messageContent.push({
+            type: "file",
+            data: pdfDataUrl,
+            mediaType: "application/pdf",
+          });
+        } catch (error) {
+          console.error("Error fetching PDF:", error);
+          // Continue with text-only if PDF fetch fails
+        }
       }
 
-      // Extract JSON from response (may be wrapped in markdown code blocks)
-      const jsonBlockRegex = /```json\s*([\s\S]*?)\s*```/;
-      const jsonObjectRegex = /\{[\s\S]*\}/;
-      const jsonBlockMatch = jsonBlockRegex.exec(responseText);
-      const jsonObjectMatch = jsonObjectRegex.exec(responseText);
-      const jsonStr = jsonBlockMatch
-        ? (jsonBlockMatch[1] ?? jsonBlockMatch[0])
-        : jsonObjectMatch
-          ? jsonObjectMatch[0]
-          : responseText;
-      const factData = JSON.parse(jsonStr) as {
-        facts?: Array<{
-          concept: string;
-          details: string;
-          confidence: number;
-        }>;
-        message?: string;
-        topic?: string;
-        learningObjective?: string;
-      };
+      const result = await generateObject({
+        // model: openai("gpt-4o-mini"),
+        model: openai("gpt-5-mini-2025-08-07"),
+        schema: factExtractionSchema,
+        messages: [
+          {
+            role: "system",
+            content: systemPrompt,
+          },
+          {
+            role: "user",
+            content: messageContent,
+          },
+        ],
+      });
+
+      const factData = result.object;
 
       // Calculate cost (GPT-4o-mini: ~$0.15 per 1M input tokens, ~$0.60 per 1M output tokens)
       const inputTokens = result.usage?.inputTokens ?? 0;
@@ -64,8 +97,8 @@ export class FactExtractionAgent {
       return {
         success: true,
         data: {
-          facts: factData.facts ?? [],
-          message: factData.message ?? "Facts extracted successfully",
+          facts: factData.facts,
+          message: factData.message,
           topic: factData.topic,
           learningObjective: factData.learningObjective,
         },
@@ -81,6 +114,25 @@ export class FactExtractionAgent {
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  private async fetchPdfAsDataUrl(pdfUrl: string): Promise<string> {
+    const response = await fetch(pdfUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch PDF: ${response.statusText}`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const uint8Array = new Uint8Array(arrayBuffer);
+
+    // Convert to base64
+    const charArray = Array.from(uint8Array, (byte) =>
+      String.fromCharCode(byte),
+    );
+    const binaryString = charArray.join("");
+    const base64Data = btoa(binaryString);
+
+    return `data:application/pdf;base64,${base64Data}`;
   }
 
   private buildSystemPrompt(): string {
@@ -104,28 +156,17 @@ For each fact, provide:
 - details: A clear explanation suitable for students (2-4 sentences)
 - confidence: A confidence score between 0 and 1 based on clarity and accuracy
 
-Output ONLY valid JSON, no additional text.
-
-Required JSON structure:
-{
-  "facts": [
-    {
-      "concept": "Main concept, event, or historical figure",
-      "details": "Clear explanation or historical context",
-      "confidence": 0.9
-    }
-  ],
-  "topic": "Main history topic (e.g., American Revolution, Ancient Rome, World War II)",
-  "learningObjective": "What the student should learn from this content",
-  "message": "Friendly message to the teacher explaining what was extracted"
-}`;
+Also provide:
+- topic: The main history topic (e.g., American Revolution, Ancient Rome, World War II)
+- learningObjective: What the student should learn from this content
+- message: A friendly message to the teacher explaining what was extracted`;
   }
 
   private buildUserPrompt(content: string): string {
-    return `Extract educational facts from this content:
+    const textPrompt = content?.trim()
+      ? `Extract educational facts from this content:\n\n${content}\n\n`
+      : "";
 
-${content}
-
-Provide a comprehensive analysis with 5-15 key facts, the main topic, and a learning objective. Return the result in JSON format.`;
+    return `${textPrompt}Provide a comprehensive analysis with 5-15 key facts, the main topic, and a learning objective.`;
   }
 }

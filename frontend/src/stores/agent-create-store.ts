@@ -537,54 +537,21 @@ export const useAgentCreateStore = create<AgentCreateState>()(
 
         const state = get();
 
-        // Process PDF files and extract text
-        let finalMessageText = message.text.trim();
-        const extractedContent: string[] = [];
+        // Check if PDF is present
+        const hasPdf = message.files.some(
+          (f) => f.mediaType === "application/pdf",
+        );
 
-        // Extract text from PDFs
-        for (const filePart of message.files) {
-          if (filePart.mediaType === "application/pdf") {
-            try {
-              // Fetch the PDF file
-              const response = await fetch(filePart.url);
-              const blob = await response.blob();
-              const file = new File(
-                [blob],
-                filePart.filename ?? "document.pdf",
-                {
-                  type: "application/pdf",
-                },
-              );
-
-              // Extract text from PDF
-              const { extractTextFromPDF } = await import("@/lib/extractPDF");
-              const pdfText = await extractTextFromPDF(file);
-              extractedContent.push(
-                `--- Content from ${filePart.filename ?? "PDF"} ---\n${pdfText}`,
-              );
-            } catch (error) {
-              console.error("Error extracting PDF text:", error);
-              // Continue even if PDF extraction fails
-            }
-          }
-        }
-
-        // Combine user text with extracted PDF content
-        if (extractedContent.length > 0) {
-          finalMessageText += `\n\n--- Extracted Learning Materials ---\n${extractedContent.join("\n\n")}`;
-        }
-
-        if (!finalMessageText.trim()) return;
-
-        // Store file attachments for display (but not the extracted text in content)
-        const displayContent = message.text.trim() || "PDF attached";
+        // Create clean message WITHOUT embedded PDF text
         const fileAttachments = message.files.filter(
           (file) => file.mediaType === "application/pdf",
         );
 
         const newMessage: Message = {
           role: "user",
-          content: finalMessageText, // Full content with extracted PDF text for API
+          content:
+            message.text.trim() ||
+            (hasPdf ? "PDF materials uploaded for analysis" : ""),
           id: Date.now().toString(),
           files: fileAttachments.length > 0 ? fileAttachments : undefined,
         };
@@ -594,16 +561,156 @@ export const useAgentCreateStore = create<AgentCreateState>()(
         state.setIsLoading(true);
         state.setError(null);
 
+        // Process PDF BEFORE sending to AI (upload must complete first)
+        if (hasPdf) {
+          // Let React update UI first by yielding control
+          await new Promise((resolve) => setTimeout(resolve, 0));
+
+          for (const filePart of message.files) {
+            if (filePart.mediaType === "application/pdf") {
+              try {
+                const response = await fetch(filePart.url);
+                const blob = await response.blob();
+                const file = new File(
+                  [blob],
+                  filePart.filename ?? "document.pdf",
+                  { type: "application/pdf" },
+                );
+
+                // Extract text immediately (fast - doesn't block UI)
+                const { extractTextFromPDF } = await import("@/lib/extractPDF");
+                const pdfText = await extractTextFromPDF(file);
+
+                // Upload PDF with text first (fast path - don't wait for images)
+                const formData = new FormData();
+                formData.append("pdf", file);
+                const currentSessionId = get().sessionId;
+                if (currentSessionId) {
+                  formData.append("sessionId", currentSessionId);
+                }
+                formData.append("extractedText", pdfText);
+                formData.append("imageCount", "0"); // Will upload images separately
+
+                const uploadResponse = await fetch(
+                  "/api/agent-create/session/upload-pdf",
+                  {
+                    method: "POST",
+                    body: formData,
+                  },
+                );
+
+                if (!uploadResponse.ok) {
+                  const errorText = await uploadResponse.text();
+                  console.error("Failed to upload PDF:", errorText);
+                  // Don't stop - continue to extractFacts even if upload fails
+                } else {
+                  const uploadData = (await uploadResponse.json()) as {
+                    sessionId: string;
+                    pdfUrl: string;
+                    imageCount: number;
+                  };
+
+                  // Store sessionId if it was just created
+                  if (uploadData.sessionId && !get().sessionId) {
+                    get().setSessionId(uploadData.sessionId);
+                  }
+
+                  if (process.env.NODE_ENV === "development") {
+                    console.log(`PDF uploaded: ${uploadData.pdfUrl}`);
+                  }
+
+                  // Extract and upload images in background (non-blocking)
+                  void (async () => {
+                    try {
+                      if (process.env.NODE_ENV === "development") {
+                        console.log("Background: Starting image extraction...");
+                      }
+
+                      const { extractImagesFromPdf } = await import(
+                        "@/lib/pdf-image-extractor"
+                      );
+                      const extractedImages = await extractImagesFromPdf(file);
+
+                      if (process.env.NODE_ENV === "development") {
+                        console.log(
+                          `Background: Extracted ${extractedImages.length} images`,
+                        );
+                      }
+
+                      if (extractedImages.length > 0 && uploadData.sessionId) {
+                        if (process.env.NODE_ENV === "development") {
+                          console.log(
+                            "Background: Uploading images to server...",
+                          );
+                        }
+
+                        // Upload images separately
+                        const imageFormData = new FormData();
+                        imageFormData.append("sessionId", uploadData.sessionId);
+                        imageFormData.append(
+                          "imageCount",
+                          extractedImages.length.toString(),
+                        );
+
+                        extractedImages.forEach((img, index) => {
+                          const filename = `page_${img.pageNumber}_img_${img.imageIndex}.png`;
+                          const imageFile = new File([img.blob], filename, {
+                            type: "image/png",
+                          });
+                          imageFormData.append(`image_${index}`, imageFile);
+                        });
+
+                        const imageUploadResponse = await fetch(
+                          "/api/agent-create/session/upload-images",
+                          {
+                            method: "POST",
+                            body: imageFormData,
+                          },
+                        );
+
+                        if (imageUploadResponse.ok) {
+                          if (process.env.NODE_ENV === "development") {
+                            console.log(
+                              `Background: Uploaded ${extractedImages.length} images from PDF`,
+                            );
+                          }
+                        } else {
+                          console.error(
+                            "Background image upload failed:",
+                            await imageUploadResponse.text(),
+                          );
+                        }
+                      } else {
+                        if (process.env.NODE_ENV === "development") {
+                          console.log(
+                            `Background: Skipping image upload - images: ${extractedImages.length}, sessionId: ${uploadData.sessionId ? "present" : "missing"}`,
+                          );
+                        }
+                      }
+                    } catch (error) {
+                      console.error(
+                        "Background image extraction failed:",
+                        error,
+                      );
+                      // Silent fail - images are optional
+                    }
+                  })();
+                }
+              } catch (error) {
+                console.error("Error processing PDF:", error);
+                // Don't stop - continue to extractFacts even if PDF processing fails
+              }
+            }
+          }
+        }
+
         try {
           if (state.workflowStep === "input") {
             await state.extractFacts(newMessages);
           } else if (state.workflowStep === "review") {
-            // Reset state for new extraction
             state.reset();
             await state.extractFacts(newMessages);
           } else if (state.workflowStep === "selection") {
-            // User is trying to add more content while in selection mode
-            // Reset and start over with new content
             state.reset();
             state.setMessages(newMessages);
             await state.extractFacts(newMessages);
@@ -719,7 +826,7 @@ export const useAgentCreateStore = create<AgentCreateState>()(
     }),
     {
       name: "agent-create-storage",
-      partialize: (state) => ({}), // Don't persist anything - sessionId is now URL-based
+      partialize: (_state) => ({}), // Don't persist anything - sessionId is now URL-based
     },
   ),
 );

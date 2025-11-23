@@ -238,6 +238,10 @@ export async function POST(req: Request) {
   // DB messages are already in chronological order
   const allMessages = [...dbMessages, ...newMessages];
 
+  // Note: PDF source materials are now accessed directly via pdfUrl in extractFactsTool
+  // The extracted text in the database serves only as a fallback if PDF is unavailable
+  // We no longer inject it into the system prompt to keep messages clean
+
   // Store tool results and assistant response
   let capturedToolResults: Array<unknown> = [];
   let assistantTextResponse = "";

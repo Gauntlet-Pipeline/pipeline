@@ -1,5 +1,4 @@
 import {
-  pgTable,
   text,
   timestamp,
   jsonb,
@@ -26,6 +25,7 @@ export const videoSessions = createVideoTable("session", {
   extractedFacts: jsonb("extracted_facts"),
   confirmedFacts: jsonb("confirmed_facts"),
   generatedScript: jsonb("generated_script"),
+  sourceMaterials: jsonb("source_materials"), // Stores extracted PDF text separately from conversation
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
