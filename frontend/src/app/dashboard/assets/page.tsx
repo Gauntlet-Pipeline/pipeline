@@ -1,16 +1,15 @@
-import { ContentGallery } from "@/components/content/ContentGallery";
+import { FinalVideosGallery } from "@/components/content/FinalVideosGallery";
 
 export default function AssetsPage() {
   return (
-    <div className="flex h-full flex-col p-4">
-      <div className="mb-4">
-        <h1 className="text-2xl font-semibold">Assets</h1>
+    <div className="flex flex-col overflow-auto p-4">
+      <div className="mb-6">
+        <h1 className="text-2xl font-semibold">My Videos</h1>
         <p className="text-muted-foreground text-sm">
-          Browse and manage your generated assets
+          All your completed educational videos
         </p>
       </div>
-      <ContentGallery />
+      <FinalVideosGallery />
     </div>
   );
 }
-
