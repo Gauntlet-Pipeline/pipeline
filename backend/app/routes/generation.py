@@ -2223,6 +2223,7 @@ async def compose_hardcode_video(
 class TestWebhookRequest(BaseModel):
     """Request model for webhook testing."""
     session_id: str
+    webhook_secret: Optional[str] = None  # Optional - if provided, overrides AWS Secrets Manager/config
 
 
 class WebhookTestResult(BaseModel):
@@ -2255,7 +2256,13 @@ async def test_webhook(request: TestWebhookRequest):
     
     settings = get_settings()
     webhook_url = settings.WEBHOOK_URL
-    webhook_secret = _get_webhook_secret()
+    
+    # Use provided webhook_secret if given, otherwise get from AWS Secrets Manager/config
+    if request.webhook_secret:
+        webhook_secret = request.webhook_secret
+        logger.info("Using webhook_secret provided in request (overriding AWS Secrets Manager/config)")
+    else:
+        webhook_secret = _get_webhook_secret()
     
     if not webhook_secret:
         raise HTTPException(

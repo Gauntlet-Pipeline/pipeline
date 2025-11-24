@@ -417,7 +417,9 @@
                 <label for="fullTestUserID">User ID:</label>
                 <input type="text" id="fullTestUserID" name="fullTestUserID" value="f6643f6a-8d48-46ff-978f-77df393ac752">
                 
-                <div style="margin-top: 15px;">
+                <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #e0e0e0;">
+                    <label for="webhookSecretInput">Webhook Secret (optional - overrides AWS Secrets Manager):</label>
+                    <input type="password" id="webhookSecretInput" name="webhookSecretInput" placeholder="Leave empty to use AWS Secrets Manager" style="margin-bottom: 10px;" autocomplete="off">
                     <button type="button" id="test-webhook-btn" class="submit-btn" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%);">
                         Test Webhook API
                     </button>
@@ -1855,6 +1857,7 @@ ${JSON.stringify(result, null, 2)}`;
 
         testWebhookBtn.addEventListener('click', async function() {
             const sessionId = document.getElementById('fullTestSessionID').value.trim();
+            const webhookSecret = document.getElementById('webhookSecretInput').value.trim();
             
             if (!sessionId) {
                 alert('Please enter a Session ID');
@@ -1867,14 +1870,21 @@ ${JSON.stringify(result, null, 2)}`;
                 webhookTestResults.style.display = 'block';
                 webhookTestContent.textContent = 'Sending test webhook calls...';
                 
+                const requestBody = {
+                    session_id: sessionId
+                };
+                
+                // Include webhook_secret if provided (overrides AWS Secrets Manager)
+                if (webhookSecret) {
+                    requestBody.webhook_secret = webhookSecret;
+                }
+                
                 const response = await fetch(`${API_BASE_URL}/api/test/webhook`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({
-                        session_id: sessionId
-                    })
+                    body: JSON.stringify(requestBody)
                 });
                 
                 const result = await response.json();
