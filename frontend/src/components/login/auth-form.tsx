@@ -8,6 +8,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { loginAction, signupAction } from "@/server/actions/auth";
 import { GoogleSignInForm } from "@/components/login/google-signin-form";
 import { SubmitButton } from "@/components/login/submit-button";
+import Link from "next/link";
+import { Video } from "lucide-react";
 
 interface AuthFormProps {
   error?: string;
@@ -21,9 +23,16 @@ export function AuthForm({
   defaultTab = "login",
 }: AuthFormProps) {
   return (
-    <Card className="mt-4 sm:mx-auto sm:w-full sm:max-w-md">
+    <Card className="bg-card/90 mt-4 sm:mx-auto sm:w-full sm:max-w-md">
       <CardContent>
         <div className="sm:mx-auto sm:w-full sm:max-w-sm">
+          <Link
+            href="/"
+            className="group mb-6 flex items-center justify-center gap-2 transition-all hover:opacity-80"
+          >
+            <Video className="text-primary h-6 w-6" />
+            <span className="text-2xl font-bold">ClassClips</span>
+          </Link>
           <h2 className="text-foreground text-center text-xl font-semibold">
             Log in or create account
           </h2>
@@ -45,7 +54,10 @@ export function AuthForm({
             </TabsList>
 
             <TabsContent value="login" className="mt-4 space-y-4">
-              <form action={loginAction} className="space-y-4">
+              <form
+                action={loginAction}
+                className="my-auto flex h-[280px] flex-col justify-center space-y-4"
+              >
                 <div>
                   <Label
                     htmlFor="username-login"
@@ -59,7 +71,7 @@ export function AuthForm({
                     name="username"
                     autoComplete="username"
                     placeholder="username or email@example.com"
-                    className="mt-2"
+                    className="mt-2 bg-white/80"
                     required
                   />
                 </div>
@@ -76,7 +88,7 @@ export function AuthForm({
                     name="password"
                     autoComplete="current-password"
                     placeholder="**************"
-                    className="mt-2"
+                    className="mt-2 bg-white/80"
                     required
                   />
                 </div>
@@ -100,7 +112,10 @@ export function AuthForm({
             </TabsContent>
 
             <TabsContent value="signup" className="mt-4 space-y-4">
-              <form action={signupAction} className="space-y-4">
+              <form
+                action={signupAction}
+                className="my-auto flex h-[380px] flex-col justify-center space-y-4"
+              >
                 <div>
                   <Label
                     htmlFor="name-signup"
@@ -114,7 +129,7 @@ export function AuthForm({
                     name="name"
                     autoComplete="name"
                     placeholder="Name"
-                    className="mt-2"
+                    className="mt-2 bg-white/80"
                     required
                   />
                 </div>
@@ -132,7 +147,7 @@ export function AuthForm({
                     name="email"
                     autoComplete="email"
                     placeholder="email@example.com"
-                    className="mt-2"
+                    className="mt-2 bg-white/80"
                     required
                   />
                 </div>
@@ -150,7 +165,7 @@ export function AuthForm({
                     name="password"
                     autoComplete="new-password"
                     placeholder="Password"
-                    className="mt-2"
+                    className="mt-2 bg-white/80"
                     required
                     minLength={8}
                   />
@@ -169,7 +184,7 @@ export function AuthForm({
                     name="confirm-password"
                     autoComplete="new-password"
                     placeholder="Password"
-                    className="mt-2"
+                    className="mt-2 bg-white/80"
                     required
                     minLength={8}
                   />

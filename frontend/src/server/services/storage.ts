@@ -221,10 +221,21 @@ export async function listUserFiles(
     }
   }
 
-  // Filter out directory markers and apply pagination
-  const files = allObjects
-    .filter((obj) => !obj.Key.endsWith("/"))
-    .slice(offset, offset + limit);
+  // Filter out directory markers
+  let filteredObjects = allObjects.filter((obj) => !obj.Key.endsWith("/"));
+
+  // Filter by asset_type if specified
+  if (options.asset_type) {
+    filteredObjects = filteredObjects.filter((obj) => {
+      const key = obj.Key;
+      // Check if the key contains the asset type folder
+      // e.g., users/{userId}/{sessionId}/final/ for asset_type: "final"
+      return key.includes(`/${options.asset_type}/`);
+    });
+  }
+
+  // Apply pagination
+  const files = filteredObjects.slice(offset, offset + limit);
 
   // Generate presigned URLs for each file
   const filesWithUrls = await Promise.all(
@@ -251,7 +262,7 @@ export async function listUserFiles(
 
   return {
     files: filesWithUrls,
-    total: allObjects.filter((obj) => obj.Key && !obj.Key.endsWith("/")).length,
+    total: filteredObjects.length,
     limit,
     offset,
   };

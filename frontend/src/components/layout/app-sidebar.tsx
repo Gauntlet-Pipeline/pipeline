@@ -6,6 +6,7 @@ import {
   History,
   Plus,
   Scissors,
+  Video,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
@@ -114,8 +115,8 @@ export function AppSidebar({
             <SidebarMenuButton size="lg" asChild className="md:h-8 md:p-0">
               <Link href="/dashboard">
                 <div className="grid flex-1 text-left text-sm leading-tight">
-                  <span className="truncate font-medium">Pipeline</span>
-                  <span className="truncate text-xs">Video Generator</span>
+                  <Video className="text-primary h-6 w-6" />
+                  <span className="text-xl font-bold">ClassClips</span>
                 </div>
               </Link>
             </SidebarMenuButton>
