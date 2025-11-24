@@ -266,7 +266,7 @@ const Hero = () => {
         }}
       />
       <Image
-        src="/Doodles/Asset 87.svg"
+        src="/Doodles/Asset 79.svg"
         alt=""
         width={55}
         height={55}
@@ -442,10 +442,10 @@ const Hero = () => {
           <Badge className="rounded-full border-none py-1">
             AI-Powered Educational Video Generation
           </Badge>
-          <h1 className="xs:text-4xl mt-6 max-w-[20ch] text-3xl leading-[1.2]! font-bold tracking-tight sm:text-5xl lg:text-[2.75rem] xl:text-5xl">
+          <h1 className="xs:text-4xl mt-6 max-w-[20ch] rounded-xl bg-white/70 p-2 text-3xl leading-[1.2]! font-bold tracking-tight sm:text-5xl lg:text-[2.75rem] xl:text-5xl">
             Create Educational Videos Students Actually Watch
           </h1>
-          <p className="xs:text-lg mt-6 max-w-[60ch]">
+          <p className="xs:text-lg mt-6 max-w-[60ch] rounded-xl bg-white/70 p-2">
             Transform teaching topics with personalized 60-second videos that
             activate student attention through their interests. Generate
             scientifically accurate, engagement-driven content in under 15
