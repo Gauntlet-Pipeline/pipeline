@@ -3,6 +3,7 @@ import { db } from "@/server/db";
 import { videoSessions } from "@/server/db/schema";
 import { eq } from "drizzle-orm";
 import type { Narration } from "@/types";
+import { selectAndCopyDiagrams } from "@/server/services/diagram-selector";
 
 export const runtime = "nodejs";
 
@@ -38,6 +39,16 @@ export async function PATCH(req: Request) {
         updatedAt: new Date(),
       })
       .where(eq(videoSessions.id, body.sessionId));
+
+    // Trigger diagram selection in the background (fire and forget)
+    // This won't block the response to the user
+    selectAndCopyDiagrams(session.user.id, body.sessionId, body.narration)
+      .then((result) => {
+        console.log("[narration/route] Diagram selection completed:", result);
+      })
+      .catch((error) => {
+        console.error("[narration/route] Diagram selection failed:", error);
+      });
 
     return new Response(
       JSON.stringify({
