@@ -1,6 +1,6 @@
 import { openai } from "@ai-sdk/openai";
-import { streamObject, type ModelMessage } from "ai";
-import { z } from "zod";
+import { type ModelMessage, streamText } from "ai";
+
 import type { Fact } from "@/types";
 import { auth } from "@/server/auth";
 import {
@@ -9,20 +9,150 @@ import {
 } from "@/server/utils/session-utils";
 import {
   saveConversationMessage,
-  saveAssistantResponse,
+  loadConversationMessages,
+  saveNewConversationMessages,
 } from "@/server/utils/message-utils";
 import { db } from "@/server/db";
 import { videoSessions } from "@/server/db/schema";
 import { eq } from "drizzle-orm";
+import { parseToolResult } from "@/lib/ai-utils";
+import { generateNarrationTool } from "./_tools/generate-narration-tool";
+import { extractFactsTool } from "./_tools/extract-facts-tools";
+import { saveStudentInfoTool } from "./_tools/save-student-info-tool";
 
-export const maxDuration = 30;
+// export const maxDuration = 30;
+
+export const runtime = "nodejs";
 
 interface RequestBody {
   messages: ModelMessage[];
-  documentContent?: string;
-  mode?: "extract" | "narrate" | "edit";
   selectedFacts?: Fact[];
   sessionId?: string | null;
+}
+
+/**
+ * Helper to process tool results and save to database (non-blocking)
+ */
+function processToolResult(
+  toolName: string,
+  toolResult: unknown,
+  sessionId: string,
+) {
+  // Fire-and-forget: don't await, but handle errors gracefully
+  const savePromise = (async () => {
+    try {
+      // AI SDK wraps tool results in an object with 'output' field
+      // Extract the actual result from the wrapper
+      let actualResult: unknown = toolResult;
+
+      if (typeof toolResult === "object" && toolResult !== null) {
+        const wrapped = toolResult as { output?: unknown; type?: string };
+        if (wrapped.type === "tool-result" && wrapped.output !== undefined) {
+          actualResult = wrapped.output;
+        }
+      }
+
+      // Parse tool result - handle both string and object formats
+      // The tool returns JSON strings, so we need to parse them
+      let resultData: {
+        facts?: Fact[];
+        narration?: unknown;
+        topic?: string;
+        learningObjective?: string;
+      };
+
+      if (typeof actualResult === "string") {
+        try {
+          resultData = JSON.parse(actualResult) as typeof resultData;
+        } catch {
+          // If parsing fails, the string might already be the data structure
+          // or it's malformed - try to continue
+          resultData = actualResult as typeof resultData;
+        }
+      } else if (actualResult !== null && typeof actualResult === "object") {
+        // Already an object, use it directly
+        resultData = actualResult as typeof resultData;
+      } else {
+        // Fallback: try to treat as the result data directly
+        resultData = actualResult as typeof resultData;
+      }
+
+      // Debug: log what we're processing
+      if (toolName === "extractFactsTool") {
+        // Check if facts exist and is an array (even if empty)
+        if (resultData.facts && Array.isArray(resultData.facts)) {
+          const updateData: {
+            extractedFacts: Fact[];
+            status: string;
+            updatedAt: Date;
+            topic?: string;
+            learningObjective?: string;
+          } = {
+            extractedFacts: resultData.facts,
+            status: "facts_extracted",
+            updatedAt: new Date(),
+          };
+
+          // Add topic and learningObjective if provided
+          if (resultData.topic) {
+            updateData.topic = resultData.topic;
+          }
+          if (resultData.learningObjective) {
+            updateData.learningObjective = resultData.learningObjective;
+          }
+
+          await db
+            .update(videoSessions)
+            .set(updateData)
+            .where(eq(videoSessions.id, sessionId));
+        }
+      } else if (toolName === "generateNarrationTool") {
+        // Check if narration exists (not null/undefined)
+        if (resultData.narration != null) {
+          await db
+            .update(videoSessions)
+            .set({
+              generatedScript: resultData.narration,
+              status: "script_generated",
+              updatedAt: new Date(),
+            })
+            .where(eq(videoSessions.id, sessionId));
+        }
+      }
+    } catch {
+      // Silently fail - errors are expected in fire-and-forget operations
+      // The database update will be retried on next request if needed
+    }
+  })();
+
+  // Don't await, but prevent unhandled rejections
+  savePromise.catch(() => {
+    /* already handled in try-catch */
+  });
+}
+
+/**
+ * Helper to build JSON response with proper headers
+ */
+function buildJsonResponse(
+  data: unknown,
+  isFirstMessage: boolean,
+  isNewSession: boolean,
+  sessionId: string,
+) {
+  const responseData = typeof data === "string" ? data : JSON.stringify(data);
+  const response = new Response(responseData, {
+    headers: {
+      "Content-Type": "application/json",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+
+  if (isFirstMessage && isNewSession) {
+    response.headers.set("x-session-id", sessionId);
+  }
+
+  return response;
 }
 
 export async function POST(req: Request) {
@@ -33,7 +163,7 @@ export async function POST(req: Request) {
   }
 
   const body = (await req.json()) as RequestBody;
-  const { messages, documentContent, mode, selectedFacts } = body;
+  const { messages, selectedFacts } = body;
 
   // Get or create session ID
   if (!session.user?.id) {
@@ -50,247 +180,327 @@ export async function POST(req: Request) {
   const isFirstMessage = messages.length === 1 && messages[0]?.role === "user";
   const isNewSession = !requestedSessionId || requestedSessionId !== sessionId;
 
-  // Save only the last user message (the new one in this request)
-  // Previous messages were already saved in earlier requests
-  const userMessages = messages.filter((m) => m.role === "user");
-  const lastUserMessage = userMessages[userMessages.length - 1];
-  if (lastUserMessage) {
+  // Save confirmedFacts if selectedFacts are provided
+  if (selectedFacts && selectedFacts.length > 0) {
     try {
-      await saveConversationMessage(sessionId, lastUserMessage, {
-        mode,
-        isFirstMessage,
-      });
-    } catch (error) {
-      console.error("Error saving user message:", error);
-      // Don't fail the request if message saving fails
+      await db
+        .update(videoSessions)
+        .set({
+          confirmedFacts: selectedFacts,
+          updatedAt: new Date(),
+        })
+        .where(eq(videoSessions.id, sessionId));
+    } catch {
+      // Continue even if save fails
     }
   }
 
-  if (mode === "extract") {
-    const result = streamObject({
-      model: openai("gpt-4o-mini"),
-      system: `You are an expert fact extractor. Your goal is to analyze the user's story and extract a list of key facts.
-      
-      For each fact, provide:
-      - concept: The main concept or term.
-      - details: A clear explanation or definition based on the story.
-      - confidence: A number between 0 and 1 indicating your confidence in this fact.
-      
-      Provide a friendly, conversational message to the user explaining what you've extracted, and return the facts in a structured format.`,
-      messages,
-      schema: z.object({
-        message: z
-          .string()
-          .describe(
-            "A friendly, conversational response to the user explaining what facts were extracted",
-          ),
-        facts: z.array(
-          z.object({
-            concept: z.string().describe("Main concept or term"),
-            details: z.string().describe("Clear explanation or definition"),
-            confidence: z.number().describe("Confidence score between 0 and 1"),
-          }),
-        ),
-      }),
-      onFinish: async (result) => {
-        if (result.object?.facts) {
-          // Save extracted facts to database
-          try {
-            await db
-              .update(videoSessions)
-              .set({
-                // Type casting as we're saving raw JSON
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                extractedFacts: result.object.facts as any,
-                status: "facts_extracted",
-                updatedAt: new Date(),
-              })
-              .where(eq(videoSessions.id, sessionId));
-          } catch (error) {
-            console.error("Error saving extracted facts:", error);
-          }
-        }
+  // Load existing conversation messages from database
+  let dbMessages: ModelMessage[] = [];
+  try {
+    dbMessages = await loadConversationMessages(sessionId);
+  } catch {
+    // Continue with empty array if load fails
+  }
 
-        // Save assistant conversational response
-        if (result.object?.message) {
-          try {
-            await saveAssistantResponse(sessionId, result.object.message, {
-              mode: "extract",
-            });
-          } catch (error) {
-            console.error("Error saving assistant response:", error);
-          }
-        }
-      },
-    });
+  // Merge DB messages with request messages, deduplicating by content
+  // Create a set of existing message content for deduplication
+  const existingContent = new Set(
+    dbMessages.map((m) => {
+      const content =
+        typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+      return `${m.role}:${content}`;
+    }),
+  );
 
-    const response = result.toTextStreamResponse();
+  // Filter out duplicate messages from request
+  const newMessages = messages.filter((msg) => {
+    const content =
+      typeof msg.content === "string"
+        ? msg.content
+        : JSON.stringify(msg.content);
+    const key = `${msg.role}:${content}`;
+    return !existingContent.has(key);
+  });
 
-    // Set sessionId header if this is a new session (first message)
-    if (isFirstMessage && isNewSession) {
-      response.headers.set("x-session-id", sessionId);
+  // Save all new messages (not just the last one)
+  if (newMessages.length > 0) {
+    try {
+      await saveNewConversationMessages(sessionId, newMessages, {
+        isFirstMessage,
+      });
+    } catch {
+      // Continue even if save fails
     }
+  }
 
-    return response;
-  } else if (mode === "narrate") {
-    const result = streamObject({
-      model: openai("gpt-4o-mini"),
-      system: `You are a creative narrator for educational videos. 
-      Your task is to create a structured narration based on the provided facts.
-      
-      The user has selected the following facts:
-      ${JSON.stringify(selectedFacts, null, 2)}
-      
-      Create a cohesive and engaging narration that incorporates these facts.
-      Provide a friendly, conversational message to the user explaining what you've created, and return the structured narration data.
-      
-      Return a structured object with the following fields:
-      - message: A conversational response to the user.
-      - total_duration: Estimated total duration in seconds.
-      - reading_level: Reading level (e.g., "6.5").
-      - key_terms_count: Number of key terms used.
-      - segments: An array of narration segments for 4 segments: hook, concept_introduction, process_explanation, conclusion.
-      
-      Each segment should have:
-      - id: Unique ID (e.g., "seg_001").
-      - type: Type of segment (e.g., "hook", "concept_introduction", "process_explanation", "conclusion").
-      - start_time: Start time in seconds.
-      - duration: Duration in seconds.
-      - narration: The script text.
-      - visual_guidance: Description of what should be shown.
-      - key_concepts: Array of key concepts covered in this segment.
-      - educational_purpose: Why this segment matters.`,
-      messages: [
-        ...messages,
-        {
-          role: "user" as const,
-          content: "Create a structured narration based on the selected facts.",
+  // Merge DB messages with new messages for AI context
+  // DB messages are already in chronological order
+  const allMessages = [...dbMessages, ...newMessages];
+
+  // Note: PDF source materials are now accessed directly via pdfUrl in extractFactsTool
+  // The extracted text in the database serves only as a fallback if PDF is unavailable
+  // We no longer inject it into the system prompt to keep messages clean
+
+  // Store tool results and assistant response
+  let capturedToolResults: Array<unknown> = [];
+  let assistantTextResponse = "";
+
+  // Build system prompt based on context
+  let systemPrompt = `You are an expert educational AI assistant helping teachers create personalized history videos for individual students.
+
+Your role:
+- Help teachers create engaging history videos tailored to specific students
+- Gather student information (age and interests) when provided to personalize content
+- Extract key facts from lesson materials
+- Generate age-appropriate, personalized narration scripts
+
+Available Tools:
+1. saveStudentInfoTool - Save student age and interest for personalization (OPTIONAL - use if teacher provides this info)
+2. extractFactsTool - Extract educational facts from learning materials (text, PDF, or lesson content)
+3. generateNarrationTool - Generate a structured narration/script from confirmed facts
+
+Conversation Flow (FLEXIBLE):
+- If the teacher mentions student age or interests, use saveStudentInfoTool to save it
+- When the teacher provides lesson content/materials, ALWAYS use extractFactsTool to analyze it
+- After facts are extracted and selected, use generateNarrationTool (will automatically use saved student info if available)
+- The teacher can skip providing student info - personalization is OPTIONAL but recommended
+
+Key Guidelines:
+- Be warm, conversational, and helpful
+- Gently encourage personalization but don't require it
+- If generating narration without student info, you can prompt: "Would you like to personalize this for a specific student? I can tailor the language and examples if you share their age and interests."
+- Always extract facts when content is provided - don't just acknowledge
+
+Be supportive and guide the teacher through the process naturally.`;
+
+  // If selectedFacts are provided, add a concise instruction
+  if (selectedFacts && selectedFacts.length > 0) {
+    systemPrompt += `\n\nThe user has selected ${selectedFacts.length} facts. Use generateNarrationTool to create a narration from them.`;
+  }
+
+  // Wrap tools to inject sessionId
+  // The AI SDK Tool type expects execute to take 2 args, but our tools only take 1
+  // We use type assertion to work around this mismatch
+  const toolsWithSessionId = {
+    saveStudentInfoTool: {
+      ...saveStudentInfoTool,
+      execute: async (
+        args: { child_age: string; child_interest: string; sessionId?: string },
+        _options?: unknown,
+      ): Promise<string> => {
+        if (!saveStudentInfoTool.execute) {
+          throw new Error("saveStudentInfoTool.execute is not defined");
+        }
+        const originalExecute = saveStudentInfoTool.execute as (args: {
+          child_age: string;
+          child_interest: string;
+          sessionId?: string;
+        }) => Promise<string>;
+        const result = await originalExecute({
+          ...args,
+          sessionId,
+        });
+        return result;
+      },
+    } as typeof saveStudentInfoTool,
+    extractFactsTool: {
+      ...extractFactsTool,
+      execute: async (
+        args: { content: string; sessionId?: string },
+        _options?: unknown,
+      ): Promise<string> => {
+        if (!extractFactsTool.execute) {
+          throw new Error("extractFactsTool.execute is not defined");
+        }
+        // Call original execute with injected sessionId
+        // Type assertion needed because Tool.execute signature expects 2 args
+        const originalExecute = extractFactsTool.execute as (args: {
+          content: string;
+          sessionId?: string;
+        }) => Promise<string>;
+        const result = await originalExecute({
+          ...args,
+          sessionId,
+        });
+        return result;
+      },
+    } as typeof extractFactsTool,
+    generateNarrationTool: {
+      ...generateNarrationTool,
+      execute: async (
+        args: {
+          facts: Array<{
+            concept: string;
+            details: string;
+            confidence?: number;
+          }>;
+          topic?: string;
+          target_duration?: number;
+          child_age?: string;
+          child_interest?: string;
+          sessionId?: string;
         },
-      ],
-      schema: z.object({
-        message: z
-          .string()
-          .describe(
-            "A friendly, conversational response to the user explaining what narration was created",
-          ),
-        total_duration: z
-          .number()
-          .describe("Estimated total duration in seconds"),
-        reading_level: z.string().describe("Reading level (e.g., '6.5')"),
-        key_terms_count: z.number().describe("Number of key terms used"),
-        segments: z.array(
-          z.object({
-            id: z.string().describe("Unique ID (e.g., 'seg_001')"),
-            type: z.string().describe("Type of segment"),
-            start_time: z.number().describe("Start time in seconds"),
-            duration: z.number().describe("Duration in seconds"),
-            narration: z.string().describe("The script text"),
-            visual_guidance: z
-              .string()
-              .describe("Description of what should be shown"),
-            key_concepts: z
-              .array(z.string())
-              .describe("Array of key concepts covered"),
-            educational_purpose: z
-              .string()
-              .describe("Why this segment matters"),
-          }),
-        ),
-      }),
-      onFinish: async (result) => {
-        if (result.object) {
-          // Save generated script to database (excluding message field)
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-unused-vars
-            const { message, ...scriptData } = result.object;
-            await db
-              .update(videoSessions)
-              .set({
-                // Type casting as we're saving raw JSON
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                generatedScript: scriptData as any,
-                status: "script_generated",
-                updatedAt: new Date(),
-              })
-              .where(eq(videoSessions.id, sessionId));
-
-            // Also save selected facts if they were provided
-            if (selectedFacts) {
-              await db
-                .update(videoSessions)
-                .set({
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  confirmedFacts: selectedFacts as any,
-                })
-                .where(eq(videoSessions.id, sessionId));
-            }
-          } catch (error) {
-            console.error("Error saving generated script:", error);
-          }
-
-          // Save assistant conversational response
-          if (result.object.message) {
-            try {
-              await saveAssistantResponse(sessionId, result.object.message, {
-                mode: "narrate",
-              });
-            } catch (error) {
-              console.error("Error saving assistant response:", error);
-            }
-          }
+        _options?: unknown,
+      ): Promise<string> => {
+        if (!generateNarrationTool.execute) {
+          throw new Error("generateNarrationTool.execute is not defined");
         }
+        // Call original execute with injected sessionId
+        // Type assertion needed because Tool.execute signature expects 2 args
+        const originalExecute = generateNarrationTool.execute as (args: {
+          facts: Array<{
+            concept: string;
+            details: string;
+            confidence?: number;
+          }>;
+          topic?: string;
+          target_duration?: number;
+          child_age?: string;
+          child_interest?: string;
+          sessionId?: string;
+        }) => Promise<string>;
+        const result = await originalExecute({
+          ...args,
+          sessionId,
+        });
+        return result;
       },
+    } as typeof generateNarrationTool,
+  };
+
+  try {
+    // Create a promise to track when onFinish completes
+    let onFinishComplete: (() => void) | null = null;
+    const onFinishPromise = new Promise<void>((resolve) => {
+      onFinishComplete = resolve;
     });
 
-    const response = result.toTextStreamResponse();
-
-    // Set sessionId header if this is a new session (first message)
-    if (isFirstMessage && isNewSession) {
-      response.headers.set("x-session-id", sessionId);
-    }
-
-    return response;
-  } else {
-    // Default behavior (edit mode)
-    const result = streamObject({
+    const result = streamText({
       model: openai("gpt-4o-mini"),
-      system: `You are a helpful assistant that edits markdown documents based on user requests.
-      Current document content:
-      ${documentContent ?? ""}
-      
-      Provide a friendly, conversational response explaining what changes you made, and return the updated document content.`,
-      messages,
-      schema: z.object({
-        documentContent: z
-          .string()
-          .describe("The updated markdown document content."),
-        reply: z
-          .string()
-          .describe(
-            "Your friendly, conversational response to the user explaining what changes were made",
-          ),
-      }),
-      onFinish: async (result) => {
-        // Save assistant conversational response
-        if (result.object?.reply) {
-          try {
-            await saveAssistantResponse(sessionId, result.object.reply, {
-              mode: "edit",
-            });
-          } catch (error) {
-            console.error("Error saving assistant response:", error);
+      system: systemPrompt,
+      messages: allMessages,
+      tools: toolsWithSessionId,
+      onFinish: async (finishResult) => {
+        try {
+          // Capture tool results for response
+          if (finishResult.toolResults) {
+            capturedToolResults = [...finishResult.toolResults];
           }
+
+          // Capture assistant text response
+          assistantTextResponse = finishResult.text;
+
+          // Save assistant response to database (non-blocking)
+          if (assistantTextResponse) {
+            saveConversationMessage(sessionId, {
+              role: "assistant",
+              content: assistantTextResponse,
+            }).catch(() => {
+              // Silently fail - non-blocking operation
+            });
+          }
+
+          // Process tool results and save to database (non-blocking)
+          if (finishResult.toolCalls && finishResult.toolResults) {
+            for (let i = 0; i < finishResult.toolCalls.length; i++) {
+              const toolCall = finishResult.toolCalls[i];
+              const toolResult = finishResult.toolResults[i];
+              if (toolCall?.toolName && toolResult) {
+                processToolResult(toolCall.toolName, toolResult, sessionId);
+
+                // Extract and save assistant message from tool result if present
+                try {
+                  // Unwrap AI SDK tool result wrapper
+                  let actualResult: unknown = toolResult;
+                  if (typeof toolResult === "object" && toolResult !== null) {
+                    const wrapped = toolResult as {
+                      output?: unknown;
+                      type?: string;
+                    };
+                    if (
+                      wrapped.type === "tool-result" &&
+                      wrapped.output !== undefined
+                    ) {
+                      actualResult = wrapped.output;
+                    }
+                  }
+
+                  // Parse the actual tool result
+                  const toolResultData = parseToolResult<{
+                    message?: string;
+                    facts?: unknown;
+                    narration?: unknown;
+                  }>(actualResult);
+
+                  if (toolResultData.message) {
+                    saveConversationMessage(sessionId, {
+                      role: "assistant",
+                      content: toolResultData.message,
+                    }).catch(() => {
+                      // Silently fail - non-blocking operation
+                    });
+                  }
+                } catch {
+                  // Silently fail if tool result doesn't have message
+                }
+              }
+            }
+          }
+        } finally {
+          // Signal that onFinish has completed
+          onFinishComplete?.();
         }
       },
     });
 
-    const response = result.toTextStreamResponse();
+    // Consume the stream to trigger onFinish
+    await result.text;
 
-    // Set sessionId header if this is a new session (first message)
-    if (isFirstMessage && isNewSession) {
-      response.headers.set("x-session-id", sessionId);
+    // Wait for onFinish to complete before proceeding
+    await onFinishPromise;
+
+    // Return tool results or default response
+    if (capturedToolResults?.length > 0) {
+      return buildJsonResponse(
+        capturedToolResults[0],
+        isFirstMessage,
+        isNewSession,
+        sessionId,
+      );
     }
 
-    return response;
+    // If AI responded with text but didn't call tool, return informative message
+    if (assistantTextResponse && capturedToolResults.length === 0) {
+      return buildJsonResponse(
+        {
+          message: assistantTextResponse,
+          facts: [],
+          error:
+            "AI did not extract facts. Please try rephrasing your request.",
+        },
+        isFirstMessage,
+        isNewSession,
+        sessionId,
+      );
+    }
+
+    return buildJsonResponse(
+      { message: "No facts extracted", facts: [] },
+      isFirstMessage,
+      isNewSession,
+      sessionId,
+    );
+  } catch (error) {
+    return new Response(
+      JSON.stringify({
+        error: "Failed to process request",
+        message: error instanceof Error ? error.message : "Unknown error",
+      }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
   }
 }

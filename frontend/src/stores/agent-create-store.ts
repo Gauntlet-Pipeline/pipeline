@@ -363,7 +363,7 @@ export const useAgentCreateStore = create<AgentCreateState>()(
             };
           });
 
-          const response = await fetch("/api/agent-create/tools", {
+          const response = await fetch("/api/agent-create", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -450,7 +450,7 @@ export const useAgentCreateStore = create<AgentCreateState>()(
             };
           });
 
-          const response = await fetch("/api/agent-create/tools", {
+          const response = await fetch("/api/agent-create", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
