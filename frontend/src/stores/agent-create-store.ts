@@ -158,6 +158,20 @@ const parseToolResponse = (
       return true;
     }
 
+    if (directJson.narration) {
+      state.setNarration(directJson.narration);
+      state.setWorkflowStep("review");
+      state.setShowNarrationReviewPrompt(true);
+      if (directJson.message) {
+        state.addMessage({
+          role: "assistant",
+          content: directJson.message,
+          id: Date.now().toString(),
+        });
+      }
+      return true;
+    }
+
     if (
       directJson.success &&
       directJson.child_age &&

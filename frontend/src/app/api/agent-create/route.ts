@@ -9,7 +9,6 @@ import {
 } from "@/server/utils/session-utils";
 import {
   saveConversationMessage,
-  loadConversationMessages,
   saveNewConversationMessages,
 } from "@/server/utils/message-utils";
 import { db } from "@/server/db";
@@ -182,48 +181,14 @@ export async function POST(req: Request) {
     }
   }
 
-  // Load existing conversation messages from database
-  let dbMessages: ModelMessage[] = [];
-  try {
-    dbMessages = await loadConversationMessages(sessionId);
-  } catch {
-    // Continue with empty array if load fails
+  // Save messages to database for persistence (fire-and-forget, non-blocking)
+  if (messages.length > 0) {
+    saveNewConversationMessages(sessionId, messages, {
+      isFirstMessage,
+    }).catch(() => {
+      // Silent fail - database save is optional for persistence
+    });
   }
-
-  // Merge DB messages with request messages, deduplicating by content
-  // Create a set of existing message content for deduplication
-  const existingContent = new Set(
-    dbMessages.map((m) => {
-      const content =
-        typeof m.content === "string" ? m.content : JSON.stringify(m.content);
-      return `${m.role}:${content}`;
-    }),
-  );
-
-  // Filter out duplicate messages from request
-  const newMessages = messages.filter((msg) => {
-    const content =
-      typeof msg.content === "string"
-        ? msg.content
-        : JSON.stringify(msg.content);
-    const key = `${msg.role}:${content}`;
-    return !existingContent.has(key);
-  });
-
-  // Save all new messages (not just the last one)
-  if (newMessages.length > 0) {
-    try {
-      await saveNewConversationMessages(sessionId, newMessages, {
-        isFirstMessage,
-      });
-    } catch {
-      // Continue even if save fails
-    }
-  }
-
-  // Merge DB messages with new messages for AI context
-  // DB messages are already in chronological order
-  const allMessages = [...dbMessages, ...newMessages];
 
   // Note: PDF source materials are now accessed directly via pdfUrl in extractFactsTool
   // The extracted text in the database serves only as a fallback if PDF is unavailable
@@ -234,28 +199,18 @@ export async function POST(req: Request) {
   let assistantTextResponse = "";
 
   // Build system prompt based on context
-  const systemPrompt = `You are an expert educational AI assistant helping teachers create personalized history videos for individual students.
+  const systemPrompt = `You are an AI assistant helping teachers create educational videos.
 
-Your role:
-- Help teachers create engaging history videos tailored to specific students
-- Gather student information (age and interests) when provided to personalize content
-- Extract key facts from lesson materials
+CRITICAL RULES - Follow these EXACTLY:
 
-Available Tools:
-1. saveStudentInfoTool - Save student age and interest for personalization (OPTIONAL - use if teacher provides this info)
-2. extractFactsTool - Extract educational facts from learning materials (text, PDF, or lesson content)
+1. If user mentions student age/interests → call saveStudentInfoTool
+2. If user message says "PDF materials uploaded" OR provides lesson content → IMMEDIATELY call extractFactsTool with the user's message content
+3. DO NOT just acknowledge uploads - you MUST call extractFactsTool
 
-Conversation Flow:
-- If the teacher mentions student age or interests, use saveStudentInfoTool to save it
-- When the teacher provides lesson content/materials, ALWAYS use extractFactsTool to analyze it
-- After facts are extracted, the teacher will select which facts to use for their video
+The extractFactsTool will automatically access uploaded PDFs from the session.
+Just call it with the user's message text as the content parameter.
 
-Key Guidelines:
-- Be warm, conversational, and helpful
-- Gently encourage personalization but don't require it
-- Always extract facts when content is provided - don't just acknowledge
-
-Be supportive and guide the teacher through the process naturally.`;
+After extracting facts, the user will select which ones to use.`;
 
   // Wrap tools to inject sessionId
   // The AI SDK Tool type expects execute to take 2 args, but our tools only take 1
@@ -316,7 +271,7 @@ Be supportive and guide the teacher through the process naturally.`;
     const result = streamText({
       model: openai("gpt-4o-mini"),
       system: systemPrompt,
-      messages: allMessages,
+      messages: messages,
       tools: toolsWithSessionId,
       onFinish: async (finishResult) => {
         try {

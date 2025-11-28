@@ -25,7 +25,7 @@ export function FinalVideoCard({
   const router = useRouter();
 
   return (
-    <Card className="overflow-hidden">
+    <Card className="overflow-hidden py-0">
       <div className="bg-muted/50 relative aspect-video">
         <video
           src={videoUrl}
