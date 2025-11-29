@@ -237,12 +237,17 @@ const systemPrompt = `You are an AI assistant helping teachers create educationa
 CRITICAL RULES - Follow these EXACTLY:
 
 1. If user mentions student age/interests → call saveStudentInfoTool
-2. If user message says "PDF materials uploaded for analysis" OR provides lesson content → IMMEDIATELY call extractFactsTool
-3. DO NOT just acknowledge uploads - you MUST call extractFactsTool
+2. If user provides any of the following → IMMEDIATELY call extractFactsTool:
+   - PDF materials uploaded for analysis
+   - A website URL to extract facts from
+   - Lesson content text
+3. DO NOT just acknowledge uploads or URLs - you MUST call extractFactsTool
 
 When calling extractFactsTool:
 - Pass the user's message text as the content parameter
-- The tool will automatically access the PDF from the file attachment
+- If user provides a URL, pass it as the websiteUrl parameter
+- The tool will automatically access PDFs from file attachments
+- The tool will fetch and analyze website content from URLs
 
 After extracting facts, the user will select which ones to use.`;
 ```
@@ -292,7 +297,7 @@ WHERE id = $sessionId
 
 ### 2. extractFactsTool
 
-**Purpose**: Extract educational facts from learning materials
+**Purpose**: Extract educational facts from learning materials (PDF, URL, or text)
 
 **Location**: `frontend/src/app/api/agent-create/tools/_tools/extract-facts-tools.ts`
 
@@ -300,22 +305,26 @@ WHERE id = $sessionId
 
 ```typescript
 {
-  content: string;    // PDF text, URL content, or direct text
-  sessionId?: string; // Injected by route
+  content: string;        // User's message text
+  pdfUrl?: string;        // PDF URL from file attachment
+  websiteUrl?: string;    // Website URL to fetch and extract facts from
+  sessionId?: string;     // Injected by route
 }
 ```
 
 **Process**:
 
-1. Loads `sourceMaterials` from session if `sessionId` provided
-   - Extracts `pdfUrl` if available for direct PDF processing
-   - Uses extracted text as fallback if no PDF URL
-2. Calls `FactExtractionAgent` with content and optional PDF URL
-3. Agent can process PDFs directly by converting to data URL
-4. Agent uses GPT-5-mini with structured output (`generateObject()`)
-5. Extracts 5-15 facts with concept, details, confidence
-6. Detects topic and learning objective
-7. Returns structured JSON via Zod schema validation
+1. Accepts three types of input:
+   - **PDF**: Provided via `pdfUrl` parameter (from file attachment)
+   - **Website URL**: Provided via `websiteUrl` parameter (OpenAI fetches natively)
+   - **Direct text**: Provided via `content` parameter
+2. Calls `FactExtractionAgent` with content and optional PDF/website URL
+3. For PDFs: Agent processes PDF directly via AI SDK file handling
+4. For URLs: Agent instructs OpenAI to fetch and analyze the website content natively
+5. Agent uses GPT-5-mini with structured output (`generateObject()`)
+6. Extracts 5-15 facts with concept, details, confidence
+7. Detects topic and learning objective
+8. Returns structured JSON via Zod schema validation
 
 **Output**:
 
@@ -524,12 +533,12 @@ Content-Type: application/json
 - Provide concept + details + confidence score
 - Identify topic and learning objective
 
-**PDF Processing**:
+**Multi-Source Processing**:
 
-- If `pdfUrl` is provided, fetches PDF and converts to base64 data URL
-- Sends PDF directly to AI model as file attachment
-- Falls back to text-only if PDF fetch fails
-- Supports both direct PDF analysis and text extraction
+- **PDF**: If `pdfUrl` is provided, sends PDF directly to AI model as file attachment
+- **Website URL**: If `websiteUrl` is provided, instructs OpenAI to fetch and analyze the URL natively
+- **Text**: Direct content analysis from user message
+- Supports flexible combinations of sources for comprehensive fact extraction
 
 **Input**:
 
@@ -538,7 +547,8 @@ Content-Type: application/json
   sessionId: string;
   data: {
     content: string;
-    pdfUrl?: string;  // Optional: Direct PDF URL for AI processing
+    pdfUrl?: string;      // Optional: Direct PDF URL for AI processing
+    websiteUrl?: string;  // Optional: Website URL for OpenAI to fetch
   }
 }
 ```
@@ -643,7 +653,7 @@ sequenceDiagram
     UI-->>User: Show assistant message
 ```
 
-### 2. Extract Facts from Learning Materials
+### 2a. Extract Facts from PDF or Text
 
 ```mermaid
 sequenceDiagram
@@ -664,17 +674,54 @@ sequenceDiagram
     API->>AI: streamText with tools + messages
     AI->>AI: Detect learning materials
     AI->>AI: Decide: call extractFactsTool
-    AI->>Tool: Execute extractFactsTool(content)
-    Tool->>Agent: process({ content })
-    Agent->>AI: generateText with fact extraction prompt
+    AI->>Tool: Execute extractFactsTool(content, pdfUrl?)
+    Tool->>Agent: process({ content, pdfUrl })
+    Agent->>AI: generateObject with fact extraction prompt
     AI-->>Agent: JSON with facts
     Agent-->>Tool: { facts, topic, message }
-    Tool-->>API: JSON string
+    Tool-->>API: JSON object
     API->>DB: UPDATE session (extractedFacts, topic) [async]
     API-->>Store: JSON { facts, message, topic }
     Store->>Store: setFacts(facts), setWorkflowStep("selection")
     Store-->>UI: Trigger re-render
     UI-->>User: Show facts in DocumentEditor + FactSelectionPrompt
+```
+
+### 2b. Extract Facts from Website URL
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant UI as AgentCreateInterface
+    participant Store as Zustand Store
+    participant API as /api/agent-create/tools
+    participant AI as GPT-4o-mini (Orchestrator)
+    participant Tool as extractFactsTool
+    participant Agent as FactExtractionAgent
+    participant OpenAI as GPT-5-mini (Fact Extraction)
+    participant DB as Database
+
+    User->>UI: "Extract facts from https://example.com/history-lesson"
+    UI->>Store: handleSubmit(message)
+    Store->>API: POST { messages, sessionId }
+    API->>DB: Load conversation history
+    API->>AI: streamText with tools + messages
+    AI->>AI: Detect URL in message
+    AI->>AI: Decide: call extractFactsTool with websiteUrl
+    AI->>Tool: Execute extractFactsTool(content, websiteUrl)
+    Tool->>Agent: process({ content, websiteUrl })
+    Agent->>OpenAI: generateObject + "Fetch and analyze URL: ..."
+    OpenAI->>OpenAI: Natively fetch website content
+    OpenAI-->>Agent: JSON with extracted facts
+    Agent-->>Tool: { facts, topic, message }
+    Tool-->>API: JSON object
+    API->>DB: UPDATE session (extractedFacts, topic) [async]
+    API-->>Store: JSON { facts, message, topic }
+    Store->>Store: setFacts(facts), setWorkflowStep("selection")
+    Store-->>UI: Trigger re-render
+    UI-->>User: Show facts in DocumentEditor + FactSelectionPrompt
+
+    Note over OpenAI: OpenAI handles URL fetching natively<br/>No CORS proxies needed
 ```
 
 ### 3. Generate Narration from Selected Facts (Direct Endpoint)
@@ -1124,6 +1171,27 @@ Tool results are saved to database asynchronously:
 - Simpler code: No manual JSON.stringify() calls
 - Fewer errors: Eliminates JSON parsing failures
 - Better DX: Cleaner tool implementations
+
+### 7. ✅ Website URL Support (Completed)
+
+**Problem**: Teachers had no way to extract facts from online resources without manually copying content
+
+**Solution**: Extended `extractFactsTool` to accept `websiteUrl` parameter; OpenAI fetches content natively
+
+**Impact**:
+
+- Enhanced flexibility: Teachers can provide PDFs, URLs, or text
+- No CORS proxies: OpenAI handles URL fetching natively (more reliable)
+- Better extraction: OpenAI understands web content better than basic HTML stripping
+- Unified interface: Single tool for all fact extraction sources
+- Simpler architecture: No need for fragile client-side URL fetching utilities
+
+**Implementation Details**:
+
+- Added `websiteUrl?: string` parameter to `extractFactsTool` schema
+- Updated `FactExtractionAgent` to handle website URLs
+- Modified system prompt to instruct AI about URL support
+- OpenAI's GPT-5-mini fetches and analyzes URLs natively
 
 ## Future Enhancements
 

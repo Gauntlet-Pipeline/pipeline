@@ -28,16 +28,17 @@ export class FactExtractionAgent {
 
       const content = input.data.content as string | undefined;
       const pdfUrl = input.data.pdfUrl as string | undefined;
+      const websiteUrl = input.data.websiteUrl as string | undefined;
 
-      // Either content or pdfUrl must be provided
-      if ((!content || content.trim().length === 0) && !pdfUrl) {
+      // Either content, pdfUrl, or websiteUrl must be provided
+      if ((!content || content.trim().length === 0) && !pdfUrl && !websiteUrl) {
         throw new Error(
-          "Either content or PDF URL is required for fact extraction",
+          "Either content, PDF URL, or website URL is required for fact extraction",
         );
       }
 
       const systemPrompt = this.buildSystemPrompt();
-      const userPrompt = this.buildUserPrompt(content ?? "");
+      const userPrompt = this.buildUserPrompt(content ?? "", websiteUrl);
 
       // Build message content - AI SDK handles PDF fetching
       const messageContent: Array<
@@ -129,11 +130,19 @@ Also provide:
 - message: A friendly message to the teacher explaining what was extracted`;
   }
 
-  private buildUserPrompt(content: string): string {
-    const textPrompt = content?.trim()
-      ? `Extract educational facts from this content:\n\n${content}\n\n`
-      : "";
+  private buildUserPrompt(content: string, websiteUrl?: string): string {
+    let prompt = "";
 
-    return `${textPrompt}Provide a comprehensive analysis with 5-15 key facts, the main topic, and a learning objective.`;
+    if (websiteUrl) {
+      prompt += `Fetch and analyze the educational content from this URL: ${websiteUrl}\n\n`;
+    }
+
+    if (content?.trim()) {
+      prompt += `Extract educational facts from this content:\n\n${content}\n\n`;
+    }
+
+    prompt += "Provide a comprehensive analysis with 5-15 key facts, the main topic, and a learning objective.";
+
+    return prompt;
   }
 }

@@ -5,18 +5,24 @@ import { FactExtractionAgent } from "@/server/agents/fact-extraction";
 
 export const extractFactsTool: Tool = {
   description:
-    "Extract educational facts from learning materials (PDF or text). Returns facts pending user review.",
+    "Extract educational facts from learning materials (PDF, URL, or text). Returns facts pending user review.",
   inputSchema: z.object({
     content: z.string().describe("The user's message text"),
     pdfUrl: z.string().optional().describe("PDF URL from file attachment"),
+    websiteUrl: z
+      .string()
+      .optional()
+      .describe("Website URL to fetch and extract facts from"),
   }),
   execute: async (
     {
       content,
       pdfUrl,
+      websiteUrl,
     }: {
       content: string;
       pdfUrl?: string;
+      websiteUrl?: string;
     },
     _options: ToolCallOptions,
   ) => {
@@ -28,6 +34,7 @@ export const extractFactsTool: Tool = {
         data: {
           content,
           pdfUrl,
+          websiteUrl,
         },
       });
 

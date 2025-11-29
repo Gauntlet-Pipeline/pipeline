@@ -178,12 +178,17 @@ export async function POST(req: Request) {
 CRITICAL RULES - Follow these EXACTLY:
 
 1. If user mentions student age/interests → call saveStudentInfoTool
-2. If user message says "PDF materials uploaded for analysis" OR provides lesson content → IMMEDIATELY call extractFactsTool
-3. DO NOT just acknowledge uploads - you MUST call extractFactsTool
+2. If user provides any of the following → IMMEDIATELY call extractFactsTool:
+   - PDF materials uploaded for analysis
+   - A website URL to extract facts from
+   - Lesson content text
+3. DO NOT just acknowledge uploads or URLs - you MUST call extractFactsTool
 
 When calling extractFactsTool:
 - Pass the user's message text as the content parameter
-- The tool will automatically access the PDF from the file attachment
+- If user provides a URL, pass it as the websiteUrl parameter
+- The tool will automatically access PDFs from file attachments
+- The tool will fetch and analyze website content from URLs
 
 After extracting facts, the user will select which ones to use.`;
 
@@ -229,7 +234,7 @@ After extracting facts, the user will select which ones to use.`;
     extractFactsTool: {
       ...extractFactsTool,
       execute: async (
-        args: { content: string; pdfUrl?: string },
+        args: { content: string; pdfUrl?: string; websiteUrl?: string },
         options: ToolCallOptions,
       ): Promise<{
         success: boolean;
@@ -239,7 +244,11 @@ After extracting facts, the user will select which ones to use.`;
         learningObjective?: string;
       }> => {
         return (await extractFactsTool.execute!(
-          { content: args.content, pdfUrl: args.pdfUrl ?? pdfUrl },
+          {
+            content: args.content,
+            pdfUrl: args.pdfUrl ?? pdfUrl,
+            websiteUrl: args.websiteUrl,
+          },
           options,
         )) as {
           success: boolean;
