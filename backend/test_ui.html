@@ -394,12 +394,7 @@
             </h2>
 
             <div class="form-group">
-                <label>Script ID (from Step 1)</label>
-                <input type="text" id="image-script-id" placeholder="Will be filled automatically">
-            </div>
-
-            <div class="form-group">
-                <label>Session ID</label>
+                <label>Session ID (from Step 1)</label>
                 <input type="text" id="image-session-id" placeholder="Will be filled automatically">
             </div>
 
@@ -435,13 +430,8 @@
             </h2>
 
             <div class="form-group">
-                <label>Script ID (from Step 1)</label>
-                <input type="text" id="script-id" placeholder="Will be filled automatically">
-            </div>
-
-            <div class="form-group">
-                <label>Session ID</label>
-                <input type="text" id="session-id" placeholder="Will be generated automatically">
+                <label>Session ID (from Step 1)</label>
+                <input type="text" id="session-id" placeholder="Will be filled automatically">
             </div>
 
             <div class="form-group">
@@ -526,7 +516,7 @@
     <script>
         const API_BASE = 'http://127.0.0.1:8000/api';
         let selectedVoice = 'alloy';
-        let currentScriptId = null;
+        // currentScriptId removed - now using session_id flow with video_session.generated_script
         let currentSessionId = null;
 
         // Voice selection
@@ -565,18 +555,16 @@
         // Create Script
         async function createScript() {
             const email = document.getElementById('user-email').value;
-            const scriptId = generateId();
-            currentScriptId = scriptId;
+            // session_id is now the main identifier (script is stored in video_session.generated_script)
             currentSessionId = generateId();
 
-            document.getElementById('script-id').value = scriptId;
             document.getElementById('session-id').value = currentSessionId;
 
             updateStatus('script-status', 'running', 'Creating...');
             document.getElementById('script-progress').classList.add('show');
 
             const scriptData = {
-                script_id: scriptId,
+                session_id: currentSessionId,  // Now uses session_id instead of script_id
                 hook: {
                     text: document.getElementById('hook-text').value,
                     duration: '10',
@@ -630,18 +618,13 @@
                 document.getElementById('view-script-btn').disabled = false;
                 document.getElementById('finalize-script-btn').disabled = false;
 
-                // Auto-fill image form
-                document.getElementById('image-script-id').value = scriptId;
+                // Auto-fill session ID in all forms
                 document.getElementById('image-session-id').value = currentSessionId;
-
-                // Auto-fill audio form
-                document.getElementById('script-id').value = scriptId;
-
-                // Auto-fill compose form
+                document.getElementById('session-id').value = currentSessionId;
                 document.getElementById('compose-session-id').value = currentSessionId;
 
                 // Fetch and display the created script
-                await displayCreatedScript(scriptId, email);
+                await displayCreatedScript(currentSessionId, email);
 
             } catch (error) {
                 updateStatus('script-status', 'error', 'Failed');
@@ -653,7 +636,7 @@
 
         // Generate Audio
         async function generateAudio() {
-            if (!currentScriptId) {
+            if (!currentSessionId) {
                 alert('Please create a script first!');
                 return;
             }
@@ -673,7 +656,7 @@
                     },
                     body: JSON.stringify({
                         session_id: currentSessionId,
-                        script_id: currentScriptId,
+                        // script_id removed - now reads from video_session.generated_script
                         voice: selectedVoice,
                         audio_option: 'tts'
                     })
@@ -706,7 +689,7 @@
 
         // Generate Story Images (using StoryImageGeneratorAgent)
         async function generateStoryImages() {
-            if (!currentScriptId || !currentSessionId) {
+            if (!currentSessionId) {
                 alert('Please create a script first!');
                 return;
             }
@@ -734,7 +717,7 @@
                     },
                     body: JSON.stringify({
                         session_id: currentSessionId,
-                        script_id: currentScriptId,
+                        // script_id removed - now reads from video_session.generated_script
                         template_title: templateTitle,
                         num_images: numImages,
                         max_passes: maxPasses,
@@ -902,7 +885,7 @@
 
         // Regenerate a specific segment
         async function regenerateSegment(segmentNumber) {
-            if (!currentScriptId || !currentSessionId) {
+            if (!currentSessionId) {
                 alert('Please create a script first!');
                 return;
             }
@@ -930,7 +913,7 @@
                     },
                     body: JSON.stringify({
                         session_id: currentSessionId,
-                        script_id: currentScriptId,
+                        // script_id removed - now reads from video_session.generated_script
                         segment_number: segmentNumber,
                         template_title: templateTitle,
                         num_images: numImages,
@@ -958,7 +941,7 @@
 
         // Generate Images
         async function generateImages() {
-            if (!currentScriptId) {
+            if (!currentSessionId) {
                 alert('Please create a script first!');
                 return;
             }
@@ -980,7 +963,7 @@
                     },
                     body: JSON.stringify({
                         session_id: currentSessionId,
-                        script_id: currentScriptId,
+                        // script_id removed - now reads from video_session.generated_script
                         model: model,
                         images_per_part: imagesPerPart
                     })
@@ -1075,18 +1058,18 @@
 
         // View Current Script (manual trigger)
         async function viewCurrentScript() {
-            if (!currentScriptId) {
+            if (!currentSessionId) {
                 alert('Please create a script first!');
                 return;
             }
 
             const email = document.getElementById('user-email').value;
-            await displayCreatedScript(currentScriptId, email);
+            await displayCreatedScript(currentSessionId, email);
         }
 
         // Finalize Script (Generate Images + Audio in Parallel)
         async function finalizeScript() {
-            if (!currentScriptId) {
+            if (!currentSessionId) {
                 alert('Please create a script first!');
                 return;
             }
@@ -1112,7 +1095,7 @@
                     },
                     body: JSON.stringify({
                         session_id: currentSessionId,
-                        script_id: currentScriptId,
+                        // script_id removed - now reads from video_session.generated_script
                         model: model,
                         images_per_part: imagesPerPart,
                         voice: voice,
@@ -1175,9 +1158,9 @@
         }
 
         // Display Created Script
-        async function displayCreatedScript(scriptId, email) {
+        async function displayCreatedScript(sessionId, email) {
             try {
-                const response = await fetch(`${API_BASE}/scripts/${scriptId}`, {
+                const response = await fetch(`${API_BASE}/scripts/${sessionId}`, {
                     headers: {
                         'X-User-Email': email
                     }
@@ -1196,7 +1179,7 @@
                 let html = `
                     <div style="margin-bottom: 20px; padding: 15px; background: white; border-radius: 8px; border: 1px solid #d1fae5;">
                         <p style="margin: 0; color: #6b7280; font-size: 0.875rem;">
-                            <strong>Script ID:</strong> ${script.script_id}<br>
+                            <strong>Session ID:</strong> ${script.session_id}<br>
                             <strong>Created:</strong> ${new Date(script.created_at).toLocaleString()}
                         </p>
                     </div>

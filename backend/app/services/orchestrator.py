@@ -9,7 +9,8 @@ ORCHESTRATOR_VERSION = "1.2.0-semantic-progression"
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text as sql_text
-from app.models.database import Session as SessionModel, Asset, GenerationCost, Script
+from app.models.database import Session as SessionModel, Asset, GenerationCost
+# Script model removed - now using video_session.generated_script
 from app.services.websocket_manager import WebSocketManager
 from app.agents.base import AgentInput
 from app.agents.prompt_parser import PromptParserAgent
@@ -229,21 +230,19 @@ class VideoGenerationOrchestrator:
         db: Session,
         session_id: str,
         user_id: int,
-        script_id: str,
         options: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Generate images from a video script.
+        Generate images from a video script stored in video_session.generated_script.
 
-        New workflow: Receives a script from the database, generates 2-3 images
+        Workflow: Reads script from video_session table, generates 2-3 images
         per script part (hook, concept, process, conclusion), uploads to S3,
         and returns micro_scenes structure.
 
         Args:
             db: Database session
-            session_id: Session ID for tracking
+            session_id: Session ID (also used to fetch script from video_session)
             user_id: User ID making the request
-            script_id: ID of the script in the database
             options: Additional options (model, images_per_part, etc.)
 
         Returns:
@@ -254,38 +253,50 @@ class VideoGenerationOrchestrator:
             if not self.image_generator:
                 raise ValueError("Image generator not initialized - check REPLICATE_API_KEY")
 
-            # Fetch script from database
-            script = db.query(Script).filter(Script.id == script_id).first()
-            if not script:
-                raise ValueError(f"Script {script_id} not found")
+            # Fetch script from video_session table
+            result = db.execute(
+                sql_text("""
+                    SELECT id, user_id, generated_script
+                    FROM video_session
+                    WHERE id = :session_id AND user_id = :user_id
+                """),
+                {"session_id": session_id, "user_id": str(user_id)}
+            ).fetchone()
 
-            # Verify ownership
-            if script.user_id != user_id:
-                raise ValueError("Unauthorized: Script does not belong to this user")
+            if not result:
+                raise ValueError(f"Video session {session_id} not found or does not belong to user")
 
-            # Create or update session in database
+            # Parse generated_script JSON
+            generated_script = result.generated_script if result.generated_script else {}
+            if isinstance(generated_script, str):
+                generated_script = json.loads(generated_script)
+
+            if not generated_script:
+                raise ValueError(f"No script found in video_session {session_id}")
+
+            # Create or update backend session in database (for tracking)
             session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
             if not session:
                 session = SessionModel(
                     id=session_id,
                     user_id=user_id,
                     status="generating_images",
-                    prompt=f"Script-based generation: {script_id}",
+                    prompt=f"Script-based generation from video_session",
                     options=options
                 )
                 db.add(session)
             else:
                 session.status = "generating_images"
-                session.prompt = f"Script-based generation: {script_id}"
+                session.prompt = f"Script-based generation from video_session"
                 session.options = options
             db.commit()
 
             # Build script object for image generator
             script_data = {
-                "hook": script.hook,
-                "concept": script.concept,
-                "process": script.process,
-                "conclusion": script.conclusion
+                "hook": generated_script.get("hook", {}),
+                "concept": generated_script.get("concept", {}),
+                "process": generated_script.get("process", {}),
+                "conclusion": generated_script.get("conclusion", {})
             }
 
             # Stage 1: Image Generation
@@ -293,7 +304,7 @@ class VideoGenerationOrchestrator:
             # Calculate images per part based on duration
             images_per_part_config = {}
             for part_name in ["hook", "concept", "process", "conclusion"]:
-                part_data = getattr(script, part_name)
+                part_data = script_data.get(part_name, {})
                 if part_data and isinstance(part_data, dict):
                     duration = float(part_data.get("duration", 10))
                     # Base: 1 image per 5 seconds, minimum 2, maximum 6
@@ -885,17 +896,15 @@ class VideoGenerationOrchestrator:
         db: Session,
         session_id: str,
         user_id: int,
-        script_id: str,
         audio_config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Generate audio narration from script using ElevenLabs TTS.
+        Generate audio narration from script stored in video_session.generated_script.
 
         Args:
             db: Database session
-            session_id: Session ID for tracking
+            session_id: Session ID (also used to fetch script from video_session)
             user_id: User ID making the request
-            script_id: ID of the script in the database
             audio_config: Audio configuration (voice_id, audio_option, etc.)
 
         Returns:
@@ -906,14 +915,26 @@ class VideoGenerationOrchestrator:
             if not self.audio_pipeline:
                 raise ValueError("Audio pipeline not initialized - check ELEVENLABS_API_KEY")
 
-            # Fetch script from database
-            script = db.query(Script).filter(Script.id == script_id).first()
-            if not script:
-                raise ValueError(f"Script {script_id} not found")
+            # Fetch script from video_session table
+            result = db.execute(
+                sql_text("""
+                    SELECT id, user_id, generated_script
+                    FROM video_session
+                    WHERE id = :session_id AND user_id = :user_id
+                """),
+                {"session_id": session_id, "user_id": str(user_id)}
+            ).fetchone()
 
-            # Verify ownership
-            if script.user_id != user_id:
-                raise ValueError("Unauthorized: Script does not belong to this user")
+            if not result:
+                raise ValueError(f"Video session {session_id} not found or does not belong to user")
+
+            # Parse generated_script JSON
+            generated_script = result.generated_script if result.generated_script else {}
+            if isinstance(generated_script, str):
+                generated_script = json.loads(generated_script)
+
+            if not generated_script:
+                raise ValueError(f"No script found in video_session {session_id}")
 
             # Update session status
             session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
@@ -924,10 +945,10 @@ class VideoGenerationOrchestrator:
 
             # Build script object for audio pipeline
             script_data = {
-                "hook": script.hook,
-                "concept": script.concept,
-                "process": script.process,
-                "conclusion": script.conclusion
+                "hook": generated_script.get("hook", {}),
+                "concept": generated_script.get("concept", {}),
+                "process": generated_script.get("process", {}),
+                "conclusion": generated_script.get("conclusion", {})
             }
 
             # Send WebSocket progress update
@@ -1085,18 +1106,18 @@ class VideoGenerationOrchestrator:
         db: Session,
         session_id: str,
         user_id: int,
-        script_id: str,
         image_options: Optional[Dict[str, Any]] = None,
         audio_config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Finalize script by generating both images and audio simultaneously.
 
+        Script is read from video_session.generated_script using session_id.
+
         Args:
             db: Database session
-            session_id: Session ID for tracking
+            session_id: Session ID (also used to fetch script from video_session)
             user_id: User ID making the request
-            script_id: ID of the script in the database
             image_options: Image generation options (model, images_per_part)
             audio_config: Audio configuration (voice, audio_option)
 
@@ -1108,16 +1129,27 @@ class VideoGenerationOrchestrator:
         try:
             logger.info(f"[{session_id}] Starting script finalization (parallel image + audio generation)")
 
-            # Fetch script from database
-            script = db.query(Script).filter(Script.id == script_id).first()
-            if not script:
-                raise ValueError(f"Script {script_id} not found")
+            # Verify video_session exists and has script
+            result = db.execute(
+                sql_text("""
+                    SELECT id, user_id, generated_script
+                    FROM video_session
+                    WHERE id = :session_id AND user_id = :user_id
+                """),
+                {"session_id": session_id, "user_id": str(user_id)}
+            ).fetchone()
 
-            # Verify ownership
-            if script.user_id != user_id:
-                raise ValueError("Unauthorized: Script does not belong to this user")
+            if not result:
+                raise ValueError(f"Video session {session_id} not found or does not belong to user")
 
-            # Update session status
+            generated_script = result.generated_script if result.generated_script else {}
+            if isinstance(generated_script, str):
+                generated_script = json.loads(generated_script)
+
+            if not generated_script:
+                raise ValueError(f"No script found in video_session {session_id}")
+
+            # Update backend session status
             session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
             if not session:
                 # Create new session
@@ -1125,7 +1157,7 @@ class VideoGenerationOrchestrator:
                     id=session_id,
                     user_id=user_id,
                     status="finalizing",
-                    prompt=f"Script-based generation: {script_id}",
+                    prompt=f"Script-based generation from video_session",
                     options={"image_options": image_options, "audio_config": audio_config}
                 )
                 db.add(session)
@@ -1148,7 +1180,6 @@ class VideoGenerationOrchestrator:
                 db=db,
                 session_id=session_id,
                 user_id=user_id,
-                script_id=script_id,
                 options=image_options or {}
             )
 
@@ -1156,7 +1187,6 @@ class VideoGenerationOrchestrator:
                 db=db,
                 session_id=session_id,
                 user_id=user_id,
-                script_id=script_id,
                 audio_config=audio_config or {}
             )
 

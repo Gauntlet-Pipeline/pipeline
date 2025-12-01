@@ -51,7 +51,7 @@ storage_service = StorageService()
 # Request/Response models
 class GenerateImagesRequest(BaseModel):
     session_id: str
-    script_id: str
+    # script_id removed - now reads from video_session.generated_script
     model: Optional[str] = "flux-schnell"
     images_per_part: Optional[int] = 2
 
@@ -135,7 +135,7 @@ async def generate_images(
 
     **Authentication:** Requires X-User-Email header from authenticated frontend.
 
-    Takes a script ID from the database and generates 2-3 images per script part
+    Reads script from video_session.generated_script and generates 2-3 images per script part
     (hook, concept, process, conclusion) based on visual guidance.
     Images are stored in S3 and tracked in the database.
 
@@ -143,8 +143,7 @@ async def generate_images(
     - `X-User-Email` (string): User's email from NextAuth session
 
     **Required Parameters:**
-    - `session_id` (string): Session ID for tracking this generation
-    - `script_id` (string): ID of the script in the database
+    - `session_id` (string): Session ID (script is read from video_session.generated_script)
 
     **Optional Parameters:**
     - `model` (string): Model to use ("flux-pro", "flux-dev", "flux-schnell", "sdxl") (default: "flux-schnell")
@@ -155,12 +154,11 @@ async def generate_images(
     - `status`: Generation status
     - `micro_scenes`: Object with hook, concept, process, conclusion images and cost
     """
-    # Call orchestrator to generate images from script
+    # Call orchestrator to generate images from script (now uses session_id to find script)
     result = await orchestrator.generate_images(
         db=db,
         session_id=request.session_id,
         user_id=current_user.id,
-        script_id=request.script_id,
         options={
             "model": request.model,
             "images_per_part": request.images_per_part
@@ -322,7 +320,7 @@ async def save_approved_clips(
 
 class GenerateAudioRequest(BaseModel):
     session_id: str
-    script_id: str
+    # script_id removed - now reads from video_session.generated_script
     voice: Optional[str] = "alloy"  # Default: alloy (OpenAI voices: alloy, echo, fable, onyx, nova, shimmer)
     audio_option: Optional[str] = "tts"  # tts, upload, none, instrumental
 
@@ -337,7 +335,7 @@ class GenerateAudioResponse(BaseModel):
 
 class FinalizeScriptRequest(BaseModel):
     session_id: str
-    script_id: str
+    # script_id removed - now reads from video_session.generated_script
     # Image generation options
     model: Optional[str] = "flux-schnell"
     images_per_part: Optional[int] = 2
@@ -379,15 +377,14 @@ async def generate_audio(
 
     **Authentication Required:** Include X-User-Email header.
 
-    Takes a script ID and generates TTS audio for each part (hook, concept, process, conclusion).
-    Audio files are stored in S3 and tracked in the database.
+    Reads script from video_session.generated_script and generates TTS audio for each part
+    (hook, concept, process, conclusion). Audio files are stored in S3 and tracked in the database.
 
     **Required Headers:**
     - `X-User-Email` (string): User's email from NextAuth session
 
     **Required Parameters:**
-    - `session_id` (string): Session ID for tracking
-    - `script_id` (string): ID of the script in the database
+    - `session_id` (string): Session ID (script is read from video_session.generated_script)
 
     **Optional Parameters:**
     - `voice` (string): OpenAI voice - "alloy", "echo", "fable", "onyx", "nova", "shimmer" (default: "alloy")
@@ -400,12 +397,11 @@ async def generate_audio(
     - `total_duration`: Total audio duration in seconds
     - `total_cost`: Total generation cost in USD
     """
-    # Call orchestrator to generate audio from script
+    # Call orchestrator to generate audio from script (now uses session_id to find script)
     result = await orchestrator.generate_audio(
         db=db,
         session_id=request.session_id,
         user_id=current_user.id,
-        script_id=request.script_id,
         audio_config={
             "voice": request.voice,
             "audio_option": request.audio_option
@@ -435,7 +431,7 @@ async def finalize_script(
 
     **Authentication Required:** Include X-User-Email header.
 
-    Takes a script ID and generates:
+    Reads script from video_session.generated_script and generates:
     - Images for each part (hook, concept, process, conclusion) using template + DALL-E
     - Audio narration for each part using OpenAI TTS
 
@@ -445,8 +441,7 @@ async def finalize_script(
     - `X-User-Email` (string): User's email from NextAuth session
 
     **Required Parameters:**
-    - `session_id` (string): Session ID for tracking
-    - `script_id` (string): ID of the script in the database
+    - `session_id` (string): Session ID (script is read from video_session.generated_script)
 
     **Optional Parameters:**
     - `model` (string): Image model - "flux-schnell", "flux-dev", "flux-pro", "sdxl" (default: "flux-schnell")
@@ -462,12 +457,11 @@ async def finalize_script(
     - `total_duration`: Total audio duration in seconds
     - `total_cost`: Combined cost of image and audio generation
     """
-    # Call orchestrator to generate images and audio simultaneously
+    # Call orchestrator to generate images and audio simultaneously (now uses session_id to find script)
     result = await orchestrator.finalize_script(
         db=db,
         session_id=request.session_id,
         user_id=current_user.id,
-        script_id=request.script_id,
         image_options={
             "model": request.model,
             "images_per_part": request.images_per_part
@@ -698,7 +692,7 @@ async def build_narrative(
 
 # Test endpoint - Save pre-written script
 class SaveTestScriptRequest(BaseModel):
-    script_id: str
+    session_id: str  # Now uses session_id instead of script_id
     hook: Dict[str, Any]
     concept: Dict[str, Any]
     process: Dict[str, Any]
@@ -707,7 +701,7 @@ class SaveTestScriptRequest(BaseModel):
 
 class SaveTestScriptResponse(BaseModel):
     status: str
-    script_id: str
+    session_id: str  # Returns session_id instead of script_id
     message: str
 
 
@@ -718,39 +712,85 @@ async def save_test_script(
     db: Session = Depends(get_db)
 ):
     """
-    Test endpoint to save a pre-written script to the database.
+    Test endpoint to save a pre-written script to video_session.generated_script.
     For testing purposes only - allows test UI to create scripts without AI.
-    """
-    from app.models.database import Script
 
-    logger.info(f"Received save-script request for script_id: {request.script_id}, user_id: {current_user.id}")
-    
+    Now stores script in video_session table instead of separate scripts table.
+    """
+    from sqlalchemy import text as sql_text
+
+    logger.info(f"Received save-script request for session_id: {request.session_id}, user_id: {current_user.id}")
+
     try:
         # Validate request data
-        if not request.script_id:
-            raise HTTPException(status_code=400, detail="script_id is required")
-        
-        # Create script in database
-        script = Script(
-            id=request.script_id,
-            user_id=current_user.id,
-            hook=request.hook,
-            concept=request.concept,
-            process=request.process,
-            conclusion=request.conclusion
-        )
+        if not request.session_id:
+            raise HTTPException(status_code=400, detail="session_id is required")
 
-        logger.debug(f"Attempting to save script: {script.id}")
-        merged_script = db.merge(script)
+        # Look up the auth_user.id by email (video_session.user_id references auth_user.id, not users.id)
+        auth_user_result = db.execute(
+            sql_text("SELECT id FROM auth_user WHERE email = :email"),
+            {"email": current_user.email}
+        ).fetchone()
+
+        if not auth_user_result:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No auth_user found with email {current_user.email}. Please ensure the user exists in auth_user table."
+            )
+
+        auth_user_id = auth_user_result.id
+        logger.info(f"Found auth_user.id: {auth_user_id} for email: {current_user.email}")
+
+        # Build the generated_script JSON structure
+        generated_script = {
+            "hook": request.hook,
+            "concept": request.concept,
+            "process": request.process,
+            "conclusion": request.conclusion
+        }
+
+        # Check if video_session exists
+        result = db.execute(
+            sql_text("SELECT id FROM video_session WHERE id = :session_id AND user_id = :user_id"),
+            {"session_id": request.session_id, "user_id": auth_user_id}
+        ).fetchone()
+
+        if result:
+            # Update existing video_session
+            db.execute(
+                sql_text("""
+                    UPDATE video_session
+                    SET generated_script = :script, updated_at = NOW()
+                    WHERE id = :session_id AND user_id = :user_id
+                """),
+                {
+                    "script": json.dumps(generated_script),
+                    "session_id": request.session_id,
+                    "user_id": auth_user_id
+                }
+            )
+            logger.info(f"Updated generated_script in existing video_session: {request.session_id}")
+        else:
+            # Create new video_session with the script
+            db.execute(
+                sql_text("""
+                    INSERT INTO video_session (id, user_id, status, generated_script, created_at, updated_at)
+                    VALUES (:session_id, :user_id, 'script_created', :script, NOW(), NOW())
+                """),
+                {
+                    "session_id": request.session_id,
+                    "user_id": auth_user_id,
+                    "script": json.dumps(generated_script)
+                }
+            )
+            logger.info(f"Created new video_session with script: {request.session_id}")
+
         db.commit()
-        db.refresh(merged_script)
-        
-        logger.info(f"Successfully saved script: {script.id}")
 
         return SaveTestScriptResponse(
             status="success",
-            script_id=request.script_id,
-            message="Test script saved successfully"
+            session_id=request.session_id,
+            message="Test script saved to video_session successfully"
         )
     except HTTPException:
         raise
@@ -766,42 +806,69 @@ async def save_test_script(
         if "could not connect" in str(e).lower() or "connection" in str(e).lower():
             error_detail += " (Database connection issue - check DATABASE_URL in .env file)"
         elif "does not exist" in str(e).lower() or "relation" in str(e).lower():
-            error_detail += " (Database table missing - run migrations: alembic upgrade head)"
+            error_detail += " (Database table missing - ensure video_session table exists)"
+        elif "violates foreign key" in str(e).lower():
+            error_detail += " (Foreign key error - ensure auth_user exists with matching email)"
         raise HTTPException(
             status_code=500,
             detail=error_detail
         )
 
 
-@router.get("/scripts/{script_id}")
+@router.get("/scripts/{session_id}")
 async def get_script(
-    script_id: str,
+    session_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Get a script by ID.
+    Get a script by session ID from video_session.generated_script.
     Returns the full script data including hook, concept, process, and conclusion.
+
+    Now reads from video_session table instead of separate scripts table.
     """
-    from app.models.database import Script
+    from sqlalchemy import text as sql_text
 
-    # Query script from database
-    script = db.query(Script).filter(
-        Script.id == script_id,
-        Script.user_id == current_user.id
-    ).first()
+    # Look up the auth_user.id by email (video_session.user_id references auth_user.id)
+    auth_user_result = db.execute(
+        sql_text("SELECT id FROM auth_user WHERE email = :email"),
+        {"email": current_user.email}
+    ).fetchone()
 
-    if not script:
-        raise HTTPException(status_code=404, detail=f"Script with ID {script_id} not found")
+    if not auth_user_result:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No auth_user found with email {current_user.email}"
+        )
+
+    auth_user_id = auth_user_result.id
+
+    # Query script from video_session table
+    result = db.execute(
+        sql_text("""
+            SELECT id, user_id, generated_script, created_at
+            FROM video_session
+            WHERE id = :session_id AND user_id = :user_id
+        """),
+        {"session_id": session_id, "user_id": auth_user_id}
+    ).fetchone()
+
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Script with session ID {session_id} not found")
+
+    # Parse generated_script JSON
+    generated_script = result.generated_script if result.generated_script else {}
+    if isinstance(generated_script, str):
+        generated_script = json.loads(generated_script)
 
     return {
-        "script_id": script.id,
-        "user_id": script.user_id,
-        "hook": script.hook,
-        "concept": script.concept,
-        "process": script.process,
-        "conclusion": script.conclusion,
-        "created_at": script.created_at.isoformat() if script.created_at else None
+        "session_id": result.id,
+        "user_id": result.user_id,
+        "hook": generated_script.get("hook", {}),
+        "concept": generated_script.get("concept", {}),
+        "process": generated_script.get("process", {}),
+        "conclusion": generated_script.get("conclusion", {}),
+        "created_at": result.created_at.isoformat() if result.created_at else None
     }
 
 
@@ -1300,7 +1367,7 @@ async def process_story_segments(
 
 class GenerateStoryImagesRequest(BaseModel):
     session_id: str
-    script_id: str
+    # script_id removed - now reads from video_session.generated_script
     template_title: Optional[str] = "Educational Video"
     num_images: Optional[int] = 2
     max_passes: Optional[int] = 5
@@ -1324,26 +1391,25 @@ async def generate_story_images(
 ):
     """
     Generate story images from a script using the StoryImageGeneratorAgent.
-    
+
     This endpoint:
-    1. Retrieves the script from the database
+    1. Retrieves the script from video_session.generated_script
     2. Converts script format (hook/concept/process/conclusion) to segments format
     3. Calls the story image generation agent
     4. Returns immediately with acceptance message
-    
+
     Real-time progress is available via WebSocket.
     """
-    from app.models.database import Script
-    
+    from sqlalchemy import text as sql_text
+
     session_id = request.session_id
-    script_id = request.script_id
-    
-    # Get or create session
+
+    # Get or create backend session
     session = db.query(SessionModel).filter(
         SessionModel.id == session_id,
         SessionModel.user_id == current_user.id
     ).first()
-    
+
     if not session:
         # Auto-create session if it doesn't exist (for test UI convenience)
         session = SessionModel(
@@ -1355,19 +1421,48 @@ async def generate_story_images(
         db.commit()
         db.refresh(session)
         logger.info(f"Auto-created session {session_id} for user {current_user.id}")
-    
-    # Get script from database
-    script = db.query(Script).filter(
-        Script.id == script_id,
-        Script.user_id == current_user.id
-    ).first()
-    
-    if not script:
+
+    # Look up the auth_user.id by email (video_session.user_id references auth_user.id)
+    auth_user_result = db.execute(
+        sql_text("SELECT id FROM auth_user WHERE email = :email"),
+        {"email": current_user.email}
+    ).fetchone()
+
+    if not auth_user_result:
         raise HTTPException(
             status_code=404,
-            detail=f"Script {script_id} not found or does not belong to user"
+            detail=f"No auth_user found with email {current_user.email}"
         )
-    
+
+    auth_user_id = auth_user_result.id
+
+    # Get script from video_session table
+    result = db.execute(
+        sql_text("""
+            SELECT id, user_id, generated_script
+            FROM video_session
+            WHERE id = :session_id AND user_id = :user_id
+        """),
+        {"session_id": session_id, "user_id": auth_user_id}
+    ).fetchone()
+
+    if not result:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Video session {session_id} not found or does not belong to user"
+        )
+
+    # Parse generated_script JSON
+    generated_script = result.generated_script if result.generated_script else {}
+    if isinstance(generated_script, str):
+        generated_script = json.loads(generated_script)
+
+    if not generated_script:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No script found in video_session {session_id}"
+        )
+
     # Check for concurrent requests
     with _processing_lock:
         if session_id in _processing_sessions and _processing_sessions[session_id]:
@@ -1376,7 +1471,7 @@ async def generate_story_images(
                 detail=f"Session {session_id} is already being processed"
             )
         _processing_sessions[session_id] = True
-    
+
     try:
         # Convert script to segments format
         segments = []
@@ -1386,21 +1481,21 @@ async def generate_story_images(
             ("process", "Process Explanation"),
             ("conclusion", "Conclusion")
         ]
-        
+
         start_time = 0
         for idx, (script_key, segment_title) in enumerate(segment_mapping, 1):
-            script_part = getattr(script, script_key, {})
+            script_part = generated_script.get(script_key, {})
             if isinstance(script_part, dict):
                 narration = script_part.get("text", "")
                 visual_guidance = script_part.get("visual_guidance", "")
                 duration_str = script_part.get("duration", "10")
-                
+
                 # Parse duration
                 try:
                     duration = int(duration_str)
                 except (ValueError, TypeError):
                     duration = 10
-                
+
                 segments.append({
                     "number": idx,
                     "title": segment_title,
@@ -1408,9 +1503,9 @@ async def generate_story_images(
                     "narrationtext": narration,
                     "visual_guidance_preview": visual_guidance
                 })
-                
+
                 start_time += duration
-        
+
         if not segments:
             raise HTTPException(
                 status_code=400,
@@ -1710,7 +1805,7 @@ async def get_story_images(
 
 class RegenerateSegmentRequest(BaseModel):
     session_id: str
-    script_id: str
+    # script_id removed - now reads from video_session.generated_script
     segment_number: int
     template_title: Optional[str] = "Educational Video"
     num_images: Optional[int] = 2
@@ -1728,46 +1823,74 @@ async def regenerate_segment(
 ):
     """
     Regenerate images for a specific segment.
-    
+
     This endpoint:
-    1. Retrieves the script from database
+    1. Retrieves the script from video_session.generated_script
     2. Extracts the specific segment
     3. Regenerates images for that segment only
     4. Updates the segment's images in S3
     """
-    from app.models.database import Script
+    from sqlalchemy import text as sql_text
     from app.agents.story_image_generator import StoryImageGeneratorAgent, generate_story_prompts
     from app.services.secrets import get_secret
     import asyncio
-    
+
     session_id = request.session_id
-    script_id = request.script_id
     segment_number = request.segment_number
-    
+
     # Verify session belongs to user
     session = db.query(SessionModel).filter(
         SessionModel.id == session_id,
         SessionModel.user_id == current_user.id
     ).first()
-    
+
     if not session:
         raise HTTPException(
             status_code=404,
             detail=f"Session {session_id} not found or does not belong to user"
         )
-    
-    # Get script from database
-    script = db.query(Script).filter(
-        Script.id == script_id,
-        Script.user_id == current_user.id
-    ).first()
-    
-    if not script:
+
+    # Look up the auth_user.id by email (video_session.user_id references auth_user.id)
+    auth_user_result = db.execute(
+        sql_text("SELECT id FROM auth_user WHERE email = :email"),
+        {"email": current_user.email}
+    ).fetchone()
+
+    if not auth_user_result:
         raise HTTPException(
             status_code=404,
-            detail=f"Script {script_id} not found or does not belong to user"
+            detail=f"No auth_user found with email {current_user.email}"
         )
-    
+
+    auth_user_id = auth_user_result.id
+
+    # Get script from video_session table
+    result = db.execute(
+        sql_text("""
+            SELECT id, user_id, generated_script
+            FROM video_session
+            WHERE id = :session_id AND user_id = :user_id
+        """),
+        {"session_id": session_id, "user_id": auth_user_id}
+    ).fetchone()
+
+    if not result:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Video session {session_id} not found or does not belong to user"
+        )
+
+    # Parse generated_script JSON
+    generated_script = result.generated_script if result.generated_script else {}
+    if isinstance(generated_script, str):
+        generated_script = json.loads(generated_script)
+
+    if not generated_script:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No script found in video_session {session_id}"
+        )
+
     # Convert script to segments format and find the target segment
     segment_mapping = [
         ("hook", "Hook", 1),
@@ -1775,21 +1898,21 @@ async def regenerate_segment(
         ("process", "Process Explanation", 3),
         ("conclusion", "Conclusion", 4)
     ]
-    
+
     target_segment = None
     for script_key, segment_title, seg_num in segment_mapping:
         if seg_num == segment_number:
-            script_part = getattr(script, script_key, {})
+            script_part = generated_script.get(script_key, {})
             if isinstance(script_part, dict):
                 narration = script_part.get("text", "")
                 visual_guidance = script_part.get("visual_guidance", "")
                 duration_str = script_part.get("duration", "10")
-                
+
                 try:
                     duration = int(duration_str)
                 except (ValueError, TypeError):
                     duration = 10
-                
+
                 target_segment = {
                     "number": seg_num,
                     "title": segment_title,
@@ -1798,7 +1921,7 @@ async def regenerate_segment(
                     "visual_guidance_preview": visual_guidance
                 }
                 break
-    
+
     if not target_segment:
         raise HTTPException(
             status_code=400,
