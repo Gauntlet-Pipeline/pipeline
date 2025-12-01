@@ -58,6 +58,8 @@ cors_origins = [
     frontend_url,
     "http://localhost:3000",  # Local development
     "http://localhost:3001",  # Alternative local port
+    "http://localhost:8000",  # Backend serving test_ui.html
+    "null",  # File:// protocol (local HTML files opened directly)
 ]
 
 # Add API Gateway domain if using (optional, for direct API Gateway access)

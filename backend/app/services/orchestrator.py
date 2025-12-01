@@ -206,7 +206,7 @@ class VideoGenerationOrchestrator:
             )
 
         self.prompt_parser = PromptParserAgent(replicate_api_key) if replicate_api_key else None
-        self.image_generator = BatchImageGeneratorAgent(openai_api_key) if openai_api_key else None
+        self.image_generator = BatchImageGeneratorAgent(openai_api_key, replicate_api_key=replicate_api_key) if openai_api_key else None
         self.narrative_builder = NarrativeBuilderAgent(replicate_api_key) if replicate_api_key else None
         self.audio_pipeline = AudioPipelineAgent(openai_api_key) if openai_api_key else None
 

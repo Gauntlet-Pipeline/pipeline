@@ -3,7 +3,7 @@ Batch Image Generator Agent
 
 Purpose: Generate multiple images for video scripts using:
 - 60% Educational Templates (customized with text overlays)
-- 40% DALL-E 3 AI Generation
+- 40% AI Generation (Gemini 3 Pro via OpenRouter)
 
 Each script part (hook, concept, process, conclusion) gets 2-3 images.
 """
@@ -17,7 +17,8 @@ from io import BytesIO
 from app.agents.base import AgentInput, AgentOutput
 from app.agents.helpers.template_matcher import TemplateMatcher
 from app.agents.helpers.psd_customizer import PSDCustomizer
-from app.agents.helpers.dalle_generator import DALLEGenerator
+# from app.agents.helpers.dalle_generator import DALLEGenerator  # Commented out - replaced by Gemini
+from app.agents.helpers.replicate_gemini_generator import ReplicateGeminiGenerator
 from app.services.storage import StorageService
 from app.services.image_verifier import ImageVerificationService
 
@@ -26,27 +27,29 @@ logger = logging.getLogger(__name__)
 
 class BatchImageGeneratorAgent:
     """
-    Generates images for video scripts using templates (60%) and DALL-E 3 (40%).
+    Generates images for video scripts using templates (60%) and Gemini 3 Pro (40%).
 
     Strategy:
     - Tries to match templates first based on key concepts
-    - Falls back to DALL-E 3 for images without template matches
+    - Falls back to Gemini 3 Pro via OpenRouter for images without template matches
     - Targets 60% template usage to minimize costs
     """
 
-    def __init__(self, openai_api_key: str = None, websocket_manager=None, session_id: Optional[str] = None):
+    def __init__(self, openai_api_key: str = None, replicate_api_key: str = None, websocket_manager=None, session_id: Optional[str] = None):
         """
         Initialize the Batch Image Generator Agent.
 
         Args:
-            openai_api_key: OpenAI API key for DALL-E 3
+            openai_api_key: OpenAI API key (kept for compatibility, not used for Gemini)
+            replicate_api_key: Replicate API key for Gemini image generation
             websocket_manager: Optional WebSocket manager for real-time updates
             session_id: Optional session ID for WebSocket updates
         """
         self.template_matcher = TemplateMatcher()
         self.psd_customizer = PSDCustomizer()
-        self.dalle_generator = DALLEGenerator(api_key=openai_api_key)
+        # self.dalle_generator = DALLEGenerator(api_key=openai_api_key)  # Commented out - replaced by Gemini
         self.storage_service = StorageService()
+        self.gemini_generator = ReplicateGeminiGenerator(api_key=replicate_api_key)
         self.websocket_manager = websocket_manager
         self.session_id = session_id
         self.image_verifier = ImageVerificationService(websocket_manager=websocket_manager, session_id=session_id)
@@ -70,7 +73,7 @@ class BatchImageGeneratorAgent:
                     conclusion: {images: [{image: url, metadata: {...}}]},
                   }
                 - data["cost"]: Total cost for all images
-                - data["stats"]: {templates_used: int, dalle_used: int}
+                - data["stats"]: {templates_used: int, gemini_used: int}
                 - cost: Total cost (same as data["cost"])
                 - duration: Total time taken
         """
@@ -138,7 +141,7 @@ class BatchImageGeneratorAgent:
             total_cost = 0.0
             errors = []
             templates_used = 0
-            dalle_used = 0
+            gemini_used = 0
 
             for i, result in enumerate(results):
                 part_name = task_metadata[i]["part_name"]
@@ -160,7 +163,7 @@ class BatchImageGeneratorAgent:
                 if result["metadata"]["source"] == "template":
                     templates_used += 1
                 else:
-                    dalle_used += 1
+                    gemini_used += 1
 
             duration = time.time() - start_time
 
@@ -172,7 +175,7 @@ class BatchImageGeneratorAgent:
                 template_pct = (templates_used / total_images * 100) if total_images > 0 else 0
                 logger.info(
                     f"[{input.session_id}] Generated {total_images} total images "
-                    f"({templates_used} templates, {dalle_used} DALL-E) "
+                    f"({templates_used} templates, {gemini_used} Gemini) "
                     f"in {duration:.2f}s (${total_cost:.2f})"
                 )
                 logger.info(f"[{input.session_id}] Template usage: {template_pct:.1f}%")
@@ -188,7 +191,7 @@ class BatchImageGeneratorAgent:
                     "cost": total_cost,
                     "stats": {
                         "templates_used": templates_used,
-                        "dalle_used": dalle_used,
+                        "gemini_used": gemini_used,
                         "total_images": total_images
                     },
                     "failed_count": len(errors),
@@ -404,36 +407,37 @@ class BatchImageGeneratorAgent:
                     except Exception as e:
                         logger.warning(
                             f"[{session_id}] Template customization failed: {e}, "
-                            f"falling back to DALL-E"
+                            f"falling back to Gemini"
                         )
-                        # Fall through to DALL-E
+                        # Fall through to Gemini
 
-            # Generate with DALL-E 3
+            # Generate with Gemini 3 Pro via OpenRouter
             # Add semantic progression keywords if enabled
             if use_semantic_progression and total_images > 1:
                 progression_keywords = self._get_progression_keywords(image_index, total_images)
                 enhanced_guidance = f"{focused_guidance}, {progression_keywords}"
                 logger.info(
                     f"[{session_id}] Generating {part_name} image {image_index + 1}/{total_images} "
-                    f"with DALL-E 3 ({progression_keywords})"
+                    f"with Gemini 3 Pro ({progression_keywords})"
                 )
             else:
                 enhanced_guidance = focused_guidance
                 logger.info(
                     f"[{session_id}] Generating {part_name} image {image_index + 1} "
-                    f"with DALL-E 3"
+                    f"with Gemini 3 Pro"
                 )
 
-            result = await self.dalle_generator.generate_image(
+            result = await self.gemini_generator.generate_image(
                 enhanced_guidance,  # Use enhanced guidance with progression
-                style="educational"
+                style="educational",
+                session_id=session_id
             )
 
             if not result['success']:
-                raise Exception(result.get('error', 'DALL-E generation failed'))
+                raise Exception(result.get('error', 'Gemini generation failed'))
 
             # Verify image quality
-            logger.info(f"[{session_id}] Verifying {part_name} image {image_index + 1} (DALL-E)...")
+            logger.info(f"[{session_id}] Verifying {part_name} image {image_index + 1} (Gemini)...")
             verification_result = await self.image_verifier.verify_image(
                 image_url=result['url'],
                 image_index=image_index
@@ -456,7 +460,7 @@ class BatchImageGeneratorAgent:
                     "part_name": part_name,
                     "image_index": image_index,
                     "duration": duration,
-                    "source": "dalle3",
+                    "source": "gemini3",
                     "quality": result.get('quality', 'standard'),
                     "key_concepts": key_concepts,
                     "visual_guidance": visual_guidance[:200],
