@@ -3535,18 +3535,44 @@ class VideoGenerationOrchestrator:
                 {"message": "Agent3 and Agent4 completed, starting Agent5"}
             )
 
-            # Load agent_4_output.json from S3 which contains both agent_3_data and agent_4_data
+            # Load agent_3_data.json and agent_4_data.json from S3 separately
             pipeline_data = None
             try:
-                agent4_output_key = f"users/{userId}/{sessionId}/agent4/agent_4_output.json"
-                response = self.storage_service.s3_client.get_object(
-                    Bucket=self.storage_service.bucket_name,
-                    Key=agent4_output_key
-                )
-                pipeline_data = json.loads(response['Body'].read().decode('utf-8'))
-                logger.info(f"Orchestrator loaded agent_4_output.json for Agent5: {agent4_output_key}")
+                agent_3_data = {}
+                agent_4_data = {}
+
+                # Load agent_3_data.json
+                try:
+                    agent3_key = f"users/{userId}/{sessionId}/agent3/agent_3_data.json"
+                    response = self.storage_service.s3_client.get_object(
+                        Bucket=self.storage_service.bucket_name,
+                        Key=agent3_key
+                    )
+                    agent_3_data = json.loads(response['Body'].read().decode('utf-8'))
+                    logger.info(f"Orchestrator loaded agent_3_data.json for Agent5")
+                except Exception as e:
+                    logger.warning(f"Orchestrator could not load agent_3_data.json: {e}")
+
+                # Load agent_4_data.json
+                try:
+                    agent4_key = f"users/{userId}/{sessionId}/agent4/agent_4_data.json"
+                    response = self.storage_service.s3_client.get_object(
+                        Bucket=self.storage_service.bucket_name,
+                        Key=agent4_key
+                    )
+                    agent_4_data = json.loads(response['Body'].read().decode('utf-8'))
+                    logger.info(f"Orchestrator loaded agent_4_data.json for Agent5")
+                except Exception as e:
+                    logger.warning(f"Orchestrator could not load agent_4_data.json: {e}")
+
+                # Combine into pipeline_data format expected by Agent5
+                if agent_3_data or agent_4_data:
+                    pipeline_data = {
+                        "agent_3_data": agent_3_data,
+                        "agent_4_data": agent_4_data
+                    }
             except Exception as e:
-                logger.warning(f"Orchestrator could not load agent_4_output.json, Agent5 will scan S3: {e}")
+                logger.warning(f"Orchestrator could not load agent data files, Agent5 will scan S3: {e}")
 
             try:
                 # Generate supersessionid for Agent5
@@ -3558,7 +3584,7 @@ class VideoGenerationOrchestrator:
                     session_id=sessionId,
                     supersessionid=agent5_supersessionid,
                     storage_service=self.storage_service,
-                    pipeline_data=pipeline_data,  # Pass combined data from agent_4_output.json
+                    pipeline_data=pipeline_data,  # Pass combined data from agent_3_data.json and agent_4_data.json
                     generation_mode="video",
                     db=db,
                     status_callback=status_callback

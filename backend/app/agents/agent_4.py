@@ -7,7 +7,6 @@ generates audio for each.
 
 Called via orchestrator in Full Test mode.
 """
-import asyncio
 import json
 import time
 import logging
@@ -150,64 +149,13 @@ async def agent_4_process(
         else:
             logger.warning(f"[SCRIPT TRACE] Agent4 extract_script_from_generated_script returned None or empty for session {session_id}")
     
-    # If script is still empty, wait for Agent3 to write it (they run in parallel)
+    # Script should be available from the database (created by frontend before orchestrator runs)
     if not script:
-        logger.info(f"Agent4 waiting for Agent3 to generate script for session {session_id}")
-        max_retries = 30  # Wait up to 30 seconds
-        retry_count = 0
-        while not script and retry_count < max_retries:
-            await asyncio.sleep(1)  # Wait 1 second between retries
-            retry_count += 1
-            
-            # Try to get script from database if db is available
-            if db is not None:
-                try:
-                    result = db.execute(
-                        sql_text(
-                            "SELECT generated_script FROM video_session WHERE id = :session_id AND user_id = :user_id"
-                        ),
-                        {"session_id": session_id, "user_id": user_id},
-                    ).fetchone()
-                    
-                    if result:
-                        if hasattr(result, "_mapping"):
-                            generated_script = dict(result._mapping).get("generated_script")
-                        else:
-                            generated_script = getattr(result, "generated_script", None)
-                        
-                        if generated_script:
-                            from app.agents.agent_2 import extract_script_from_generated_script
-                            extracted_script = extract_script_from_generated_script(generated_script)
-                            if extracted_script:
-                                script = extracted_script
-                                logger.info(f"Agent4 found script from database after {retry_count} seconds")
-                                break
-                except Exception as e:
-                    logger.debug(f"Agent4 database query failed while waiting for script: {e}")
-            
-            # Try to get script from S3 (Agent3 writes agent_3_data.json to S3)
-            if not script and storage_service and storage_service.s3_client:
-                try:
-                    s3_key_agent3 = f"users/{user_id}/{session_id}/agent3/agent_3_data.json"
-                    response = storage_service.s3_client.get_object(
-                        Bucket=storage_service.bucket_name,
-                        Key=s3_key_agent3
-                    )
-                    agent_3_data = json.loads(response['Body'].read().decode('utf-8'))
-                    if agent_3_data.get("script"):
-                        script = agent_3_data["script"]
-                        logger.info(f"Agent4 found script from S3 after {retry_count} seconds")
-                        break
-                except Exception as e:
-                    # S3 file doesn't exist yet or other error - continue waiting
-                    logger.debug(f"Agent4 S3 check failed (file may not exist yet): {e}")
-        
-        if not script:
-            raise ValueError(
-                f"Agent4 could not find script after waiting {max_retries} seconds. "
-                f"Agent3 may not have generated the script yet or there was an error. "
-                f"Topic: {bool(topic)}, Confirmed Facts: {bool(confirmed_facts)}, Generation Script: {bool(generation_script)}"
-            )
+        raise ValueError(
+            f"Agent4 could not find script in database. "
+            f"Script must be created by frontend and stored in video_session.generated_script before calling orchestrator. "
+            f"Session: {session_id}, Topic: {bool(topic)}, Generation Script: {bool(generation_script)}"
+        )
 
     # Helper function to send status (via callback or websocket_manager)
     async def send_status(agentnumber: str, status: str, **kwargs):
@@ -361,19 +309,6 @@ async def agent_4_process(
 
         result_data = audio_result.data
 
-        # Read agent_3_data.json from S3
-        agent_3_data = {}
-        try:
-            s3_key_agent3 = f"users/{user_id}/{session_id}/agent3/agent_3_data.json"
-            response = storage_service.s3_client.get_object(
-                Bucket=storage_service.bucket_name,
-                Key=s3_key_agent3
-            )
-            agent_3_data = json.loads(response['Body'].read().decode('utf-8'))
-            logger.info(f"Agent4 loaded agent_3_data.json from S3: {s3_key_agent3}")
-        except Exception as e:
-            logger.warning(f"Agent4 could not load agent_3_data.json from S3: {e}")
-
         # Upload audio files to S3 and build agent_4_data structure
         audio_files_output = []
         background_music_output = None
@@ -423,31 +358,28 @@ async def agent_4_process(
                         except Exception as e:
                             logger.warning(f"Failed to upload audio file to S3: {e}")
 
-        # Create combined output structure with agent_3_data and agent_4_data
-        combined_output = {
-            "agent_3_data": agent_3_data,
-            "agent_4_data": {
-                "audio_files": audio_files_output,
-                "background_music": background_music_output if background_music_output else {
-                    "url": "",
-                    "duration": 60
-                }
+        # Create agent_4_data output structure
+        agent_4_data = {
+            "audio_files": audio_files_output,
+            "background_music": background_music_output if background_music_output else {
+                "url": "",
+                "duration": 60
             }
         }
 
-        # Upload combined output to S3 as agent_4_output.json
+        # Upload agent_4_data to S3
         try:
-            s3_key_output = f"users/{user_id}/{session_id}/agent4/agent_4_output.json"
-            output_json = json.dumps(combined_output, indent=2).encode('utf-8')
+            s3_key_output = f"users/{user_id}/{session_id}/agent4/agent_4_data.json"
+            output_json = json.dumps(agent_4_data, indent=2).encode('utf-8')
             storage_service.s3_client.put_object(
                 Bucket=storage_service.bucket_name,
                 Key=s3_key_output,
                 Body=output_json,
                 ContentType='application/json'
             )
-            logger.info(f"Agent4 uploaded agent_4_output.json to S3: {s3_key_output}")
+            logger.info(f"Agent4 uploaded agent_4_data.json to S3: {s3_key_output}")
         except Exception as e:
-            logger.error(f"Agent4 failed to upload agent_4_output.json: {e}", exc_info=True)
+            logger.error(f"Agent4 failed to upload agent_4_data.json: {e}", exc_info=True)
 
         # Report finished status
         finished_kwargs = {

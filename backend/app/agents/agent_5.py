@@ -1031,10 +1031,16 @@ async def agent_5_process(
                 base_scene = pipeline_data.get("base_scene", {})
             else:
                 base_scene = {}
-            style = base_scene.get("style", "")
-            setting = base_scene.get("setting", "")
-            teacher_desc = base_scene.get("teacher", "")
-            students_desc = base_scene.get("students", "")
+            # Extract base_scene fields, converting dicts to strings if needed
+            def to_string(val):
+                if isinstance(val, dict):
+                    return " ".join(str(v) for v in val.values() if v)
+                return str(val) if val else ""
+
+            style = to_string(base_scene.get("style", ""))
+            setting = to_string(base_scene.get("setting", ""))
+            teacher_desc = to_string(base_scene.get("teacher", ""))
+            students_desc = to_string(base_scene.get("students", ""))
 
             # Sanitize the base prompt to remove text-triggering keywords
             prompt_sanitized = sanitize_video_prompt(prompt)
