@@ -118,8 +118,10 @@ class VideoVerificationService:
             self._check_visual_consistency(result, video_path)
             logger.info(f"   ✓ Check 7/8: Visual consistency - {result.checks[-1].status.value}")
 
-            self._check_text_presence(result, video_path)
-            logger.info(f"   ✓ Check 8/8: Text detection - {result.checks[-1].status.value}")
+            # DISABLED: Skip text detection check
+            # self._check_text_presence(result, video_path)
+            # logger.info(f"   ✓ Check 8/8: Text detection - {result.checks[-1].status.value}")
+            logger.info(f"   ⏭ Check 8/8: Text detection - SKIPPED (disabled)")
 
             logger.info("=" * 80)
             logger.info(

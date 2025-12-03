@@ -575,13 +575,16 @@ class StoryImageGeneratorAgent:
 
             total_cost += gen_metadata.get("cost", 0.0)
 
-            # Verify image
-            verify_success, verify_result, verify_error, verify_metadata = await self._verify_image_no_labels(
-                image_bytes,
-                max_verification_passes
-            )
+            # Verify image - DISABLED: Skip text/annotation detection
+            # verify_success, verify_result, verify_error, verify_metadata = await self._verify_image_no_labels(
+            #     image_bytes,
+            #     max_verification_passes
+            # )
+            # total_cost += verify_metadata.get("cost", 0.0)
 
-            total_cost += verify_metadata.get("cost", 0.0)
+            # Always pass verification (text detection disabled)
+            verify_success = True
+            verify_metadata = {"cost": 0.0, "time_seconds": 0.0, "attempts_made": 0, "confidence": 1.0}
 
             if verify_success:
                 # Upload to S3

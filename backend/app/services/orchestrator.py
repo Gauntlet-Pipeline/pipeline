@@ -9,7 +9,8 @@ ORCHESTRATOR_VERSION = "1.2.0-semantic-progression"
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text as sql_text
-from app.models.database import Session as SessionModel, Asset, GenerationCost, Script
+from app.models.database import Session as SessionModel, Asset, GenerationCost
+# Script model removed - now using video_session.generated_script
 from app.services.websocket_manager import WebSocketManager
 from app.agents.base import AgentInput
 from app.agents.prompt_parser import PromptParserAgent
@@ -206,7 +207,7 @@ class VideoGenerationOrchestrator:
             )
 
         self.prompt_parser = PromptParserAgent(replicate_api_key) if replicate_api_key else None
-        self.image_generator = BatchImageGeneratorAgent(openai_api_key) if openai_api_key else None
+        self.image_generator = BatchImageGeneratorAgent(openai_api_key, replicate_api_key=replicate_api_key) if openai_api_key else None
         self.narrative_builder = NarrativeBuilderAgent(replicate_api_key) if replicate_api_key else None
         self.audio_pipeline = AudioPipelineAgent(openai_api_key) if openai_api_key else None
 
@@ -229,21 +230,19 @@ class VideoGenerationOrchestrator:
         db: Session,
         session_id: str,
         user_id: int,
-        script_id: str,
         options: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Generate images from a video script.
+        Generate images from a video script stored in video_session.generated_script.
 
-        New workflow: Receives a script from the database, generates 2-3 images
+        Workflow: Reads script from video_session table, generates 2-3 images
         per script part (hook, concept, process, conclusion), uploads to S3,
         and returns micro_scenes structure.
 
         Args:
             db: Database session
-            session_id: Session ID for tracking
+            session_id: Session ID (also used to fetch script from video_session)
             user_id: User ID making the request
-            script_id: ID of the script in the database
             options: Additional options (model, images_per_part, etc.)
 
         Returns:
@@ -254,38 +253,46 @@ class VideoGenerationOrchestrator:
             if not self.image_generator:
                 raise ValueError("Image generator not initialized - check REPLICATE_API_KEY")
 
-            # Fetch script from database
-            script = db.query(Script).filter(Script.id == script_id).first()
-            if not script:
-                raise ValueError(f"Script {script_id} not found")
+            # Fetch script from video_session table
+            result = db.execute(
+                sql_text("""
+                    SELECT id, user_id, generated_script
+                    FROM video_session
+                    WHERE id = :session_id AND user_id = :user_id
+                """),
+                {"session_id": session_id, "user_id": str(user_id)}
+            ).fetchone()
 
-            # Verify ownership
-            if script.user_id != user_id:
-                raise ValueError("Unauthorized: Script does not belong to this user")
+            if not result:
+                raise ValueError(f"Video session {session_id} not found or does not belong to user")
 
-            # Create or update session in database
+            # Parse generated_script JSON
+            generated_script = result.generated_script if result.generated_script else {}
+            if isinstance(generated_script, str):
+                generated_script = json.loads(generated_script)
+
+            if not generated_script:
+                raise ValueError(f"No script found in video_session {session_id}")
+
+            # Create or update backend session in database (for tracking)
             session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
             if not session:
                 session = SessionModel(
                     id=session_id,
                     user_id=user_id,
-                    status="generating_images",
-                    prompt=f"Script-based generation: {script_id}",
-                    options=options
+                    status="generating_images"
                 )
                 db.add(session)
             else:
                 session.status = "generating_images"
-                session.prompt = f"Script-based generation: {script_id}"
-                session.options = options
             db.commit()
 
             # Build script object for image generator
             script_data = {
-                "hook": script.hook,
-                "concept": script.concept,
-                "process": script.process,
-                "conclusion": script.conclusion
+                "hook": generated_script.get("hook", {}),
+                "concept": generated_script.get("concept", {}),
+                "process": generated_script.get("process", {}),
+                "conclusion": generated_script.get("conclusion", {})
             }
 
             # Stage 1: Image Generation
@@ -293,7 +300,7 @@ class VideoGenerationOrchestrator:
             # Calculate images per part based on duration
             images_per_part_config = {}
             for part_name in ["hook", "concept", "process", "conclusion"]:
-                part_data = getattr(script, part_name)
+                part_data = script_data.get(part_name, {})
                 if part_data and isinstance(part_data, dict):
                     duration = float(part_data.get("duration", 10))
                     # Base: 1 image per 5 seconds, minimum 2, maximum 6
@@ -476,426 +483,22 @@ class VideoGenerationOrchestrator:
         db.add(cost_record)
         db.commit()
 
-    async def generate_clips(
-        self,
-        db: Session,
-        session_id: str,
-        user_id: int,
-        video_prompt: str,
-        clip_config: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """
-        Generate video clips using Stable Video Diffusion via Replicate.
 
-        Integrated by Person C with Video Generator Agent.
-
-        Args:
-            db: Database session
-            session_id: Session ID for tracking
-            video_prompt: Prompt for video generation
-            clip_config: Configuration for clip generation
-
-        Returns:
-            Dict containing status, generated clips, and cost information
-        """
-        try:
-            # Validate video generator is initialized
-            if not self.video_generator:
-                raise ValueError("Video Generator not initialized - check REPLICATE_API_KEY")
-
-            # Update session status
-            session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
-            if session:
-                session.status = "generating_clips"
-                session.video_prompt = video_prompt
-                session.clip_config = clip_config
-                db.commit()
-
-            # Get approved images from database
-            approved_images = db.query(Asset).filter(
-                Asset.session_id == session_id,
-                Asset.type == "image",
-                Asset.approved == True
-            ).all()
-
-            if not approved_images:
-                raise ValueError("No approved images found for video generation")
-
-            # Convert to format expected by Video Generator
-            image_data_list = [
-                {
-                    "id": str(img.id),
-                    "url": img.url,
-                    "view_type": img.asset_metadata.get("view_type", "unknown") if img.asset_metadata else "unknown"
-                }
-                for img in approved_images
-            ]
-
-            # Send WebSocket progress update
-            await self.websocket_manager.broadcast_status(
-                session_id,
-                status="generating_clips",
-                progress=60,
-                details=f"Generating {len(image_data_list)} video clips with AI..."
-            )
-
-            logger.info(f"[{session_id}] Generating clips from {len(image_data_list)} approved images")
-
-            # Call Video Generator Agent
-            # Default to Gen-4-Turbo (fastest and cheapest for testing: $0.015/sec vs $0.20/sec)
-            default_model = "gen-4-turbo"
-
-            video_gen_input = AgentInput(
-                session_id=session_id,
-                data={
-                    "approved_images": image_data_list,
-                    "video_prompt": video_prompt,
-                    "clip_duration": clip_config.get("clip_duration", 3.0) if clip_config else 3.0,  # Shorter clips for faster processing
-                    "model": clip_config.get("model", default_model) if clip_config else default_model,
-                    "user_id": user_id  # Pass user_id for S3 upload in video_generator
-                }
-            )
-
-            video_result = await self.video_generator.process(video_gen_input)
-
-            if not video_result.success:
-                raise ValueError(f"Video generation failed: {video_result.error}")
-
-            # Track costs
-            self._record_cost(
-                db,
-                session_id,
-                agent="video_generator",
-                model=clip_config.get("model", default_model) if clip_config else default_model,
-                cost=video_result.cost,
-                duration=video_result.duration
-            )
-
-            # Store generated clips in database
-            # Clips are already uploaded to S3 by video_generator
-            clips = video_result.data["clips"]
-            for i, clip_data in enumerate(clips):
-                # Clips already have S3 URLs from video_generator
-                storage_url = clip_data["url"]
-                logger.info(f"[{session_id}] Clip {i+1} already in S3: {storage_url}")
-
-                asset = Asset(
-                    session_id=session_id,
-                    type="video",
-                    url=storage_url,  # S3 URL from video_generator
-                    approved=False,
-                    asset_metadata={
-                        "source_image_id": clip_data["source_image_id"],
-                        "duration": clip_data["duration"],
-                        "resolution": clip_data["resolution"],
-                        "fps": clip_data["fps"],
-                        "model": clip_data["model"],
-                        "scene_prompt": clip_data["scene_prompt"],
-                        "motion_intensity": clip_data["motion_intensity"],
-                        "cost": clip_data["cost"],
-                        "generation_time": clip_data["generation_time"],
-                        "asset_id": clip_data.get("id", f"clip_{uuid.uuid4().hex[:12]}")
-                    }
-                )
-                db.add(asset)
-
-            db.commit()
-
-            # Update session status
-            if session:
-                session.status = "reviewing_clips"
-                db.commit()
-
-            # Update progress
-            await self.websocket_manager.broadcast_status(
-                session_id,
-                status="clips_generated",
-                progress=80,
-                details=f"Generated {len(clips)} video clips! Cost: ${video_result.cost:.2f}"
-            )
-
-            logger.info(
-                f"[{session_id}] Clip generation complete: "
-                f"{len(clips)} clips, ${video_result.cost:.2f}"
-            )
-
-            return {
-                "status": "success",
-                "session_id": session_id,
-                "clips": clips,
-                "total_cost": video_result.cost,
-                "scenes_planned": video_result.data.get("scenes_planned", [])
-            }
-
-        except Exception as e:
-            logger.error(f"[{session_id}] Clip generation failed: {e}")
-
-            # Update session with error
-            session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
-            if session:
-                session.status = "failed"
-                db.commit()
-
-            await self.websocket_manager.broadcast_status(
-                session_id,
-                status="error",
-                progress=0,
-                details=f"Clip generation failed: {str(e)}"
-            )
-
-            return {
-                "status": "error",
-                "session_id": session_id,
-                "message": str(e)
-            }
-
-    async def compose_final_video(
-        self,
-        db: Session,
-        session_id: str,
-        user_id: int,
-        text_config: Optional[Dict[str, Any]] = None,
-        audio_config: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """
-        Compose final video with text overlays and audio using FFmpeg.
-
-        Integrated by Person C with FFmpeg Compositor.
-
-        Args:
-            db: Database session
-            session_id: Session ID for tracking
-            text_config: Text overlay configuration
-            audio_config: Audio configuration
-
-        Returns:
-            Dict containing status and final video URL
-        """
-        try:
-            # Update session status
-            session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
-            if session:
-                session.status = "composing"
-                session.text_config = text_config
-                session.audio_config = audio_config
-                db.commit()
-
-            # Get approved clips from database
-            approved_clips = db.query(Asset).filter(
-                Asset.session_id == session_id,
-                Asset.type == "video",
-                Asset.approved == True
-            ).all()
-
-            if not approved_clips:
-                raise ValueError("No approved clips found for composition")
-
-            # Convert to format expected by FFmpeg Compositor
-            clip_data_list = [
-                {
-                    "url": clip.url,
-                    "duration": clip.asset_metadata.get("duration", 3.0) if clip.asset_metadata else 3.0
-                }
-                for clip in approved_clips
-            ]
-
-            # Send WebSocket progress update
-            await self.websocket_manager.broadcast_status(
-                session_id,
-                status="composing",
-                progress=90,
-                details=f"Composing {len(clip_data_list)} clips into final video..."
-            )
-
-            logger.info(f"[{session_id}] Composing final video from {len(clip_data_list)} approved clips")
-
-            # Call FFmpeg Compositor
-            composition_result = await self.ffmpeg_compositor.compose_final_video(
-                clips=clip_data_list,
-                text_config=text_config,
-                audio_config=audio_config,
-                session_id=session_id
-            )
-
-            final_video_path = composition_result["output_path"]
-            duration = composition_result.get("duration", 0.0)
-
-            logger.info(f"[{session_id}] Video composed at: {final_video_path}")
-
-            # Store final video in database
-            final_asset = Asset(
-                session_id=session_id,
-                type="final_video",
-                url=final_video_path,  # Local path for now (TODO: upload to S3)
-                approved=True,
-                asset_metadata={
-                    "duration": duration,
-                    "num_clips": len(clip_data_list),
-                    "text_config": text_config,
-                    "audio_config": audio_config,
-                    "resolution": "1920x1080",
-                    "fps": 30
-                }
-            )
-            db.add(final_asset)
-
-            # Update session with final result
-            if session:
-                session.status = "completed"
-                session.final_video_url = final_video_path
-                session.completed_at = datetime.utcnow()
-                db.commit()
-
-            # Update progress
-            await self.websocket_manager.broadcast_status(
-                session_id,
-                status="completed",
-                progress=100,
-                details="Video composition complete!"
-            )
-
-            logger.info(
-                f"[{session_id}] Final video complete: "
-                f"{duration:.1f}s, {len(clip_data_list)} clips"
-            )
-
-            return {
-                "status": "success",
-                "session_id": session_id,
-                "video_url": final_video_path,
-                "duration": duration,
-                "num_clips": len(clip_data_list)
-            }
-
-        except Exception as e:
-            logger.error(f"[{session_id}] Video composition failed: {e}")
-
-            # Update session with error
-            session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
-            if session:
-                session.status = "failed"
-                db.commit()
-
-            await self.websocket_manager.broadcast_status(
-                session_id,
-                status="error",
-                progress=0,
-                details=f"Video composition failed: {str(e)}"
-            )
-
-            return {
-                "status": "error",
-                "session_id": session_id,
-                "message": str(e)
-            }
-
-    async def build_narrative(
-        self,
-        db: Session,
-        user_id: int,
-        topic: str,
-        learning_objective: str,
-        key_points: list[str]
-    ) -> Dict[str, Any]:
-        """
-        Build a narrative script for a 60-second video using the Narrative Builder agent.
-
-        Args:
-            db: Database session
-            user_id: User ID requesting the narrative
-            topic: Main topic/subject of the video
-            learning_objective: What the viewer should learn
-            key_points: Array of key points to cover
-
-        Returns:
-            Dict containing session_id, script, and cost information
-        """
-        try:
-            # Validate narrative builder is initialized
-            if not self.narrative_builder:
-                raise ValueError("Narrative Builder not initialized - check REPLICATE_API_KEY")
-
-            logger.info(f"[User {user_id}] Building narrative for topic: {topic}")
-
-            # Call Narrative Builder Agent
-            narrative_input = AgentInput(
-                session_id="",  # Will be generated by the agent
-                data={
-                    "user_id": user_id,
-                    "topic": topic,
-                    "learning_objective": learning_objective,
-                    "key_points": key_points
-                }
-            )
-
-            narrative_result = await self.narrative_builder.process(narrative_input)
-
-            if not narrative_result.success:
-                raise ValueError(f"Narrative building failed: {narrative_result.error}")
-
-            # Extract session ID and script from result
-            session_id = narrative_result.data["session_id"]
-            script = narrative_result.data["script"]
-
-            # Create session in database to track this narrative
-            session = SessionModel(
-                id=session_id,
-                user_id=user_id,
-                status="completed",
-                prompt=f"Narrative: {topic}"
-            )
-            db.add(session)
-            db.commit()
-
-            # Track cost in database
-            self._record_cost(
-                db,
-                session_id,
-                agent="narrative_builder",
-                model="meta-llama-3-70b",
-                cost=narrative_result.cost,
-                duration=narrative_result.duration
-            )
-
-            logger.info(
-                f"[{session_id}] Narrative built successfully for user {user_id}, "
-                f"cost: ${narrative_result.cost:.4f}"
-            )
-
-            return {
-                "status": "success",
-                "session_id": session_id,
-                "script": script,
-                "cost": narrative_result.cost,
-                "duration": narrative_result.duration,
-                "topic": topic,
-                "learning_objective": learning_objective
-            }
-
-        except Exception as e:
-            logger.error(f"[User {user_id}] Narrative building failed: {e}")
-
-            return {
-                "status": "error",
-                "message": str(e)
-            }
 
     async def generate_audio(
         self,
         db: Session,
         session_id: str,
         user_id: int,
-        script_id: str,
         audio_config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Generate audio narration from script using ElevenLabs TTS.
+        Generate audio narration from script stored in video_session.generated_script.
 
         Args:
             db: Database session
-            session_id: Session ID for tracking
+            session_id: Session ID (also used to fetch script from video_session)
             user_id: User ID making the request
-            script_id: ID of the script in the database
             audio_config: Audio configuration (voice_id, audio_option, etc.)
 
         Returns:
@@ -906,28 +509,39 @@ class VideoGenerationOrchestrator:
             if not self.audio_pipeline:
                 raise ValueError("Audio pipeline not initialized - check ELEVENLABS_API_KEY")
 
-            # Fetch script from database
-            script = db.query(Script).filter(Script.id == script_id).first()
-            if not script:
-                raise ValueError(f"Script {script_id} not found")
+            # Fetch script from video_session table
+            result = db.execute(
+                sql_text("""
+                    SELECT id, user_id, generated_script
+                    FROM video_session
+                    WHERE id = :session_id AND user_id = :user_id
+                """),
+                {"session_id": session_id, "user_id": str(user_id)}
+            ).fetchone()
 
-            # Verify ownership
-            if script.user_id != user_id:
-                raise ValueError("Unauthorized: Script does not belong to this user")
+            if not result:
+                raise ValueError(f"Video session {session_id} not found or does not belong to user")
+
+            # Parse generated_script JSON
+            generated_script = result.generated_script if result.generated_script else {}
+            if isinstance(generated_script, str):
+                generated_script = json.loads(generated_script)
+
+            if not generated_script:
+                raise ValueError(f"No script found in video_session {session_id}")
 
             # Update session status
             session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
             if session:
                 session.status = "generating_audio"
-                session.audio_config = audio_config
                 db.commit()
 
             # Build script object for audio pipeline
             script_data = {
-                "hook": script.hook,
-                "concept": script.concept,
-                "process": script.process,
-                "conclusion": script.conclusion
+                "hook": generated_script.get("hook", {}),
+                "concept": generated_script.get("concept", {}),
+                "process": generated_script.get("process", {}),
+                "conclusion": generated_script.get("conclusion", {})
             }
 
             # Send WebSocket progress update
@@ -1085,18 +699,18 @@ class VideoGenerationOrchestrator:
         db: Session,
         session_id: str,
         user_id: int,
-        script_id: str,
         image_options: Optional[Dict[str, Any]] = None,
         audio_config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Finalize script by generating both images and audio simultaneously.
 
+        Script is read from video_session.generated_script using session_id.
+
         Args:
             db: Database session
-            session_id: Session ID for tracking
+            session_id: Session ID (also used to fetch script from video_session)
             user_id: User ID making the request
-            script_id: ID of the script in the database
             image_options: Image generation options (model, images_per_part)
             audio_config: Audio configuration (voice, audio_option)
 
@@ -1108,30 +722,38 @@ class VideoGenerationOrchestrator:
         try:
             logger.info(f"[{session_id}] Starting script finalization (parallel image + audio generation)")
 
-            # Fetch script from database
-            script = db.query(Script).filter(Script.id == script_id).first()
-            if not script:
-                raise ValueError(f"Script {script_id} not found")
+            # Verify video_session exists and has script
+            result = db.execute(
+                sql_text("""
+                    SELECT id, user_id, generated_script
+                    FROM video_session
+                    WHERE id = :session_id AND user_id = :user_id
+                """),
+                {"session_id": session_id, "user_id": str(user_id)}
+            ).fetchone()
 
-            # Verify ownership
-            if script.user_id != user_id:
-                raise ValueError("Unauthorized: Script does not belong to this user")
+            if not result:
+                raise ValueError(f"Video session {session_id} not found or does not belong to user")
 
-            # Update session status
+            generated_script = result.generated_script if result.generated_script else {}
+            if isinstance(generated_script, str):
+                generated_script = json.loads(generated_script)
+
+            if not generated_script:
+                raise ValueError(f"No script found in video_session {session_id}")
+
+            # Update backend session status
             session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
             if not session:
                 # Create new session
                 session = SessionModel(
                     id=session_id,
                     user_id=user_id,
-                    status="finalizing",
-                    prompt=f"Script-based generation: {script_id}",
-                    options={"image_options": image_options, "audio_config": audio_config}
+                    status="finalizing"
                 )
                 db.add(session)
             else:
                 session.status = "finalizing"
-                session.options = {"image_options": image_options, "audio_config": audio_config}
 
             db.commit()
 
@@ -1148,7 +770,6 @@ class VideoGenerationOrchestrator:
                 db=db,
                 session_id=session_id,
                 user_id=user_id,
-                script_id=script_id,
                 options=image_options or {}
             )
 
@@ -1156,7 +777,6 @@ class VideoGenerationOrchestrator:
                 db=db,
                 session_id=session_id,
                 user_id=user_id,
-                script_id=script_id,
                 audio_config=audio_config or {}
             )
 
@@ -1330,8 +950,18 @@ class VideoGenerationOrchestrator:
 
             logger.info(f"[{session_id}] Extension factor: {extension_factor:.2f}x")
 
-            # Get the script to extract narration text for video prompts
-            script = db.query(Script).filter(Script.id == session.prompt.split(": ")[-1]).first() if session and session.prompt else None
+            # Get the script from video_session.generated_script (scripts are now stored there, not in separate table)
+            script_data = None
+            try:
+                from sqlalchemy import text as sql_text
+                result = db.execute(
+                    sql_text("SELECT generated_script FROM video_session WHERE id = :session_id"),
+                    {"session_id": session_id}
+                ).fetchone()
+                if result and result.generated_script:
+                    script_data = result.generated_script if isinstance(result.generated_script, dict) else json.loads(result.generated_script)
+            except Exception as e:
+                logger.warning(f"[{session_id}] Could not fetch script from video_session: {e}")
 
             for part in parts:
                 # Get ALL approved images for this part (not just the first)
@@ -1342,8 +972,8 @@ class VideoGenerationOrchestrator:
 
                 # Get script text for this part to use in video prompts
                 script_text = None
-                if script:
-                    part_data = getattr(script, part, None)
+                if script_data:
+                    part_data = script_data.get(part, {})
                     if part_data and isinstance(part_data, dict):
                         script_text = part_data.get("text", "")
 
@@ -3209,7 +2839,9 @@ class VideoGenerationOrchestrator:
             sessionId: Session identifier
             db: Optional database session (if None, will try to create one)
         """
-        from app.agents.agent_2 import agent_2_process
+        logger.info("Orchestrator: Importing agent_3_process...")
+        from app.agents.agent_3 import agent_3_process
+        logger.info("Orchestrator: Successfully imported agent_3_process")
         from app.agents.agent_4 import agent_4_process
         from app.agents.agent_5 import agent_5_process
         
@@ -3430,21 +3062,18 @@ class VideoGenerationOrchestrator:
             # Send orchestrator processing status
             await self._send_orchestrator_status(
                 userId, sessionId, "processing",
-                {"message": "Orchestrator triggering Agent2 and Agent4 in parallel"}
+                {"message": "Orchestrator triggering Agent3 and Agent4 in parallel"}
             )
-            
-            # Trigger Agent2 and Agent4 in parallel
+
+            # Trigger Agent3 and Agent4 in parallel
             # Agents will query the database themselves for video_session_data, or use provided data
-            agent2_task = agent_2_process(
+            agent3_task = agent_3_process(
                 websocket_manager=None,  # Not used - using callback instead
                 user_id=userId,
                 session_id=sessionId,
-                template_id="",  # Not used in Full Test
-                chosen_diagram_id="",  # Not used in Full Test
-                script_id="",  # Not used in Full Test
                 storage_service=self.storage_service,
                 video_session_data=video_session_data,  # Pass video_session_data if db is not available
-                db=db,  # Pass db so Agent2 can query if needed
+                db=db,  # Pass db so Agent3 can query if needed
                 status_callback=status_callback
             )
             
@@ -3454,10 +3083,9 @@ class VideoGenerationOrchestrator:
                 user_id=userId,
                 session_id=sessionId,
                 script={},  # Will be extracted from video_session by Agent4
-                voice="alloy",
+                voice="sage",
                 audio_option="tts",
                 storage_service=self.storage_service,
-                agent2_data=None,
                 video_session_data=video_session_data,  # Pass video_session_data if db is not available
                 db=db,  # Pass db so Agent4 can query if needed
                 status_callback=status_callback
@@ -3466,22 +3094,22 @@ class VideoGenerationOrchestrator:
             # Run both agents in parallel
             # If either agent fails, asyncio.gather will raise immediately and stop the pipeline
             try:
-                agent2_result, agent4_result = await asyncio.gather(agent2_task, agent4_task)
-                logger.info(f"Agent2 and Agent4 completed successfully for session {sessionId}")
+                agent3_result, agent4_result = await asyncio.gather(agent3_task, agent4_task)
+                logger.info(f"Agent3 and Agent4 completed successfully for session {sessionId}")
             except Exception as e:
-                logger.error(f"Agent2 or Agent4 failed: {e}", exc_info=True)
-                
+                logger.error(f"Agent3 or Agent4 failed: {e}", exc_info=True)
+
                 # Send error status to WebSocket first
                 await self._send_orchestrator_status(
                     userId, sessionId, "error",
                     {"error": str(e), "reason": f"Agent execution failed: {type(e).__name__}"}
                 )
-                
+
                 # Send webhook notification after WebSocket notification
                 error_payload = {
                     "error": str(e),
                     "reason": f"Agent execution failed: {type(e).__name__}",
-                    "failedAgent": "Agent2 or Agent4"
+                    "failedAgent": "Agent3 or Agent4"
                 }
                 await self._send_webhook_notification(
                     sessionId=sessionId,
@@ -3489,27 +3117,53 @@ class VideoGenerationOrchestrator:
                     status="video_failed",
                     payload=error_payload
                 )
-                
+
                 raise  # Stop pipeline immediately - do not proceed to Agent5
-            
-            # After Agent2+Agent4 complete successfully, trigger Agent5 synchronously
+
+            # After Agent3+Agent4 complete successfully, trigger Agent5 synchronously
             await self._send_orchestrator_status(
                 userId, sessionId, "processing",
-                {"message": "Agent2 and Agent4 completed, starting Agent5"}
+                {"message": "Agent3 and Agent4 completed, starting Agent5"}
             )
 
-            # Load agent_4_output.json from S3 which contains both agent_2_data and agent_4_data
+            # Load agent_3_data.json and agent_4_data.json from S3 separately
             pipeline_data = None
             try:
-                agent4_output_key = f"users/{userId}/{sessionId}/agent4/agent_4_output.json"
-                response = self.storage_service.s3_client.get_object(
-                    Bucket=self.storage_service.bucket_name,
-                    Key=agent4_output_key
-                )
-                pipeline_data = json.loads(response['Body'].read().decode('utf-8'))
-                logger.info(f"Orchestrator loaded agent_4_output.json for Agent5: {agent4_output_key}")
+                agent_3_data = {}
+                agent_4_data = {}
+
+                # Load agent_3_data.json
+                try:
+                    agent3_key = f"users/{userId}/{sessionId}/agent3/agent_3_data.json"
+                    response = self.storage_service.s3_client.get_object(
+                        Bucket=self.storage_service.bucket_name,
+                        Key=agent3_key
+                    )
+                    agent_3_data = json.loads(response['Body'].read().decode('utf-8'))
+                    logger.info(f"Orchestrator loaded agent_3_data.json for Agent5")
+                except Exception as e:
+                    logger.warning(f"Orchestrator could not load agent_3_data.json: {e}")
+
+                # Load agent_4_data.json
+                try:
+                    agent4_key = f"users/{userId}/{sessionId}/agent4/agent_4_data.json"
+                    response = self.storage_service.s3_client.get_object(
+                        Bucket=self.storage_service.bucket_name,
+                        Key=agent4_key
+                    )
+                    agent_4_data = json.loads(response['Body'].read().decode('utf-8'))
+                    logger.info(f"Orchestrator loaded agent_4_data.json for Agent5")
+                except Exception as e:
+                    logger.warning(f"Orchestrator could not load agent_4_data.json: {e}")
+
+                # Combine into pipeline_data format expected by Agent5
+                if agent_3_data or agent_4_data:
+                    pipeline_data = {
+                        "agent_3_data": agent_3_data,
+                        "agent_4_data": agent_4_data
+                    }
             except Exception as e:
-                logger.warning(f"Orchestrator could not load agent_4_output.json, Agent5 will scan S3: {e}")
+                logger.warning(f"Orchestrator could not load agent data files, Agent5 will scan S3: {e}")
 
             try:
                 # Generate supersessionid for Agent5
@@ -3521,7 +3175,7 @@ class VideoGenerationOrchestrator:
                     session_id=sessionId,
                     supersessionid=agent5_supersessionid,
                     storage_service=self.storage_service,
-                    pipeline_data=pipeline_data,  # Pass combined data from agent_4_output.json
+                    pipeline_data=pipeline_data,  # Pass combined data from agent_3_data.json and agent_4_data.json
                     generation_mode="video",
                     db=db,
                     status_callback=status_callback
@@ -3534,7 +3188,7 @@ class VideoGenerationOrchestrator:
                 websocket_payload = {
                     "message": "Full Test process completed successfully",
                     "videoUrl": video_url,
-                    "agent2Result": agent2_result,
+                    "agent3Result": agent3_result,
                     "agent4Result": agent4_result,
                     "agent5Result": agent5_result
                 }
@@ -3549,7 +3203,7 @@ class VideoGenerationOrchestrator:
                 # Capture the full WebSocket payload structure that was sent
                 payload_data = {
                     "message": websocket_payload.get("message"),
-                    "agent2Result": websocket_payload.get("agent2Result"),
+                    "agent3Result": websocket_payload.get("agent3Result"),
                     "agent4Result": websocket_payload.get("agent4Result"),
                     "agent5Result": websocket_payload.get("agent5Result")
                 }

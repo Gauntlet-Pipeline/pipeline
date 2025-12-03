@@ -44,6 +44,7 @@ if not hasattr(app.state, 'active_sessions'):
     app.state.active_sessions: Dict[str, Dict[str, asyncio.Task]] = {}
 
 
+@app.get("/")
 @app.get("/health")
 @app.get("/api/health")
 def health_check():
@@ -58,6 +59,8 @@ cors_origins = [
     frontend_url,
     "http://localhost:3000",  # Local development
     "http://localhost:3001",  # Alternative local port
+    "http://localhost:8000",  # Backend serving test_ui.html
+    "null",  # File:// protocol (local HTML files opened directly)
 ]
 
 # Add API Gateway domain if using (optional, for direct API Gateway access)
@@ -83,265 +86,6 @@ app.include_router(diagnostics_router)
 # Include generation router
 from app.routes.generation import router as generation_router
 app.include_router(generation_router)
-
-
-# Request/Response models
-class ProcessRequest(BaseModel):
-    sessionId: str
-    script: str
-    diagramUrls: Optional[List[str]] = None
-
-
-class ProcessResponse(BaseModel):
-    success: bool
-    message: str
-    sessionId: str
-    videoId: str
-    videoUrl: str
-
-
-# Agent 2: Storyboard Generator
-async def agent_2_generate_storyboard(
-    session_id: str,
-    script: str,
-    diagram_urls: Optional[List[str]] = None
-) -> str:
-    """
-    Agent 2: Generate storyboard from script and optional diagrams.
-
-    Returns:
-        storyboardId: ID of the generated storyboard
-    """
-    # TODO: Implement storyboard generation logic
-    storyboard_id = f"storyboard-{session_id}-stub"
-    return storyboard_id
-
-
-# Agent 3: Audio Generator
-async def agent_3_generate_audio(
-    session_id: str,
-    storyboard_id: str
-) -> dict:
-    """
-    Agent 3: Generate narration and music from storyboard.
-
-    Returns:
-        dict with narrationIds and musicId
-    """
-    # TODO: Implement audio generation logic
-    return {
-        "narrationIds": [f"narration-{session_id}-1-stub", f"narration-{session_id}-2-stub"],
-        "musicId": f"music-{session_id}-stub"
-    }
-
-
-# Agent 4: Video Composer
-async def agent_4_compose_video(
-    session_id: str,
-    storyboard_id: str,
-    narration_ids: List[str],
-    music_id: str
-) -> dict:
-    """
-    Agent 4: Compose final video and store in S3 + database.
-
-    Returns:
-        dict with videoId and videoUrl
-    """
-    # TODO: Implement video composition logic
-    # TODO: Upload to S3
-    # TODO: Store reference in database
-    video_id = f"video-{session_id}-stub"
-    video_url = f"https://s3.amazonaws.com/bucket/{video_id}.mp4"
-    return {
-        "videoId": video_id,
-        "videoUrl": video_url
-    }
-
-
-@app.post("/api/process", response_model=ProcessResponse)
-async def process(request: ProcessRequest):
-    """
-    Process endpoint that orchestrates the video generation pipeline.
-
-    Flow:
-    1. Agent 2: Generate storyboard from inputs
-    2. Agent 3: Generate narration and music from storyboard
-    3. Agent 4: Compose video and store in S3/database
-    """
-    # Agent 2: Generate storyboard
-    storyboard_id = await agent_2_generate_storyboard(
-        session_id=request.sessionId,
-        script=request.script,
-        diagram_urls=request.diagramUrls
-    )
-
-    # Agent 3: Generate audio
-    audio_result = await agent_3_generate_audio(
-        session_id=request.sessionId,
-        storyboard_id=storyboard_id
-    )
-
-    # Agent 4: Compose video
-    video_result = await agent_4_compose_video(
-        session_id=request.sessionId,
-        storyboard_id=storyboard_id,
-        narration_ids=audio_result["narrationIds"],
-        music_id=audio_result["musicId"]
-    )
-
-    return ProcessResponse(
-        success=True,
-        message="Video generation completed",
-        sessionId=request.sessionId,
-        videoId=video_result["videoId"],
-        videoUrl=video_result["videoUrl"]
-    )
-
-
-@app.get("/")
-async def root():
-    """Health check endpoint."""
-    return {"status": "healthy", "service": "Gauntlet Pipeline Orchestrator"}
-
-
-class TestWebhookRequest(BaseModel):
-    """Request model for testing webhook."""
-    session_id: Optional[str] = "test-session-123"
-
-
-class TestWebhookResponse(BaseModel):
-    """Response model for test webhook endpoint."""
-    success: bool
-    message: str
-    webhook_url: str
-    status_sent: str
-    response_status_code: Optional[int] = None
-    response_body: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-
-
-@app.post("/api/test-webhook", response_model=TestWebhookResponse)
-async def test_webhook(request: TestWebhookRequest):
-    """
-    Test endpoint to send a dummy webhook POST call to the webhook URL.
-    Uses webhook secret from config/AWS Secrets Manager.
-    """
-    from app.services.orchestrator import _get_webhook_secret
-    
-    webhook_url = settings.WEBHOOK_URL
-    webhook_secret = _get_webhook_secret()
-    
-    if not webhook_secret:
-        return TestWebhookResponse(
-            success=False,
-            message="WEBHOOK_SECRET not configured. Please set WEBHOOK_SECRET in .env file or AWS Secrets Manager.",
-            webhook_url=webhook_url or "not configured",
-            status_sent="none",
-            error="WEBHOOK_SECRET not found"
-        )
-    
-    if not webhook_url:
-        return TestWebhookResponse(
-            success=False,
-            message="WEBHOOK_URL not configured.",
-            webhook_url="not configured",
-            status_sent="none",
-            error="WEBHOOK_URL not found"
-        )
-    
-    # Create dummy webhook payload
-    # Use provided session_id or default test session ID
-    if request.session_id:
-        session_id = request.session_id.strip() or "test-session-123"
-    else:
-        session_id = "test-session-123"
-    dummy_payload = {
-        "sessionId": session_id,
-        "videoUrl": "https://example.com/test-video.mp4",
-        "status": "video_complete"
-    }
-    
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                webhook_url,
-                headers={
-                    "Content-Type": "application/json",
-                    "x-webhook-secret": webhook_secret
-                },
-                json=dummy_payload
-            )
-            
-            response_body = None
-            try:
-                response_body = response.json()
-            except Exception:
-                try:
-                    response_body = {"raw_text": response.text[:500]}
-                except Exception:
-                    response_body = {"raw_text": "Unable to read response body"}
-            
-            if response.is_success:
-                return TestWebhookResponse(
-                    success=True,
-                    message=f"Webhook test successful! Sent {dummy_payload['status']} status.",
-                    webhook_url=webhook_url,
-                    status_sent=dummy_payload["status"],
-                    response_status_code=response.status_code,
-                    response_body=response_body
-                )
-            else:
-                # Safely extract error text
-                try:
-                    error_text = response.text[:200]
-                except Exception:
-                    error_text = "Unable to read response text"
-                
-                return TestWebhookResponse(
-                    success=False,
-                    message=f"Webhook test failed with status {response.status_code}",
-                    webhook_url=webhook_url,
-                    status_sent=dummy_payload["status"],
-                    response_status_code=response.status_code,
-                    response_body=response_body,
-                    error=f"HTTP {response.status_code}: {error_text}"
-                )
-                
-    except httpx.HTTPStatusError as e:
-        # Safely extract response text
-        try:
-            error_text = e.response.text[:200]
-            response_text = e.response.text[:500]
-        except Exception:
-            error_text = "Unable to read response text"
-            response_text = "Unable to read response text"
-        
-        return TestWebhookResponse(
-            success=False,
-            message=f"Webhook test failed: HTTP {e.response.status_code}",
-            webhook_url=webhook_url,
-            status_sent=dummy_payload["status"],
-            response_status_code=e.response.status_code,
-            response_body={"raw_text": response_text},
-            error=f"HTTP {e.response.status_code}: {error_text}"
-        )
-    except httpx.RequestError as e:
-        return TestWebhookResponse(
-            success=False,
-            message=f"Webhook test failed: Network error",
-            webhook_url=webhook_url,
-            status_sent=dummy_payload["status"],
-            error=f"Network error: {str(e)}"
-        )
-    except Exception as e:
-        return TestWebhookResponse(
-            success=False,
-            message=f"Webhook test failed: {str(e)}",
-            webhook_url=webhook_url,
-            status_sent=dummy_payload["status"],
-            error=f"Unexpected error: {str(e)}"
-        )
 
 
 class CheckProcessingRequest(BaseModel):
@@ -775,21 +519,9 @@ async def get_video_session(session_id: str, db: Session = Depends(get_db)):
 # =============================================================================
 
 class StartProcessingRequest(BaseModel):
-    """Request model for starting the agent processing pipeline."""
-    agent_selection: Optional[str] = "Full Test"  # "Full Test", "Agent2", "Agent4", "Agent5"
-    video_session_data: Optional[dict] = None  # For Full Test mode
-    # Individual agent fields (optional, required for individual agents)
-    userID: Optional[str] = None
-    sessionID: Optional[str] = None
-    templateID: Optional[str] = None
-    chosenDiagramID: Optional[str] = None
-    scriptID: Optional[str] = None
-    # Agent4 specific fields
-    script: Optional[dict] = None  # For Agent4
-    voice: Optional[str] = None  # For Agent4
-    audio_option: Optional[str] = None  # For Agent4
-    # Agent5 specific fields
-    supersessionid: Optional[str] = None  # For Agent5
+    """Request model for starting the video generation pipeline."""
+    userID: str
+    sessionID: str
 
 
 class StartProcessingResponse(BaseModel):
@@ -805,22 +537,23 @@ async def start_processing(
     background_tasks: BackgroundTasks,
 ) -> StartProcessingResponse:
     """
-    Start the agent processing pipeline.
+    Start the video generation pipeline.
 
     Expected request format:
     {
         "sessionID": "<session-id>",
-        "userID": "<user-id>",
-        "agent_selection": "Full Test"
+        "userID": "<user-id>"
     }
 
-    Supports multiple modes:
-    - Full Test: Requires sessionID, userID
-    - Agent2: Requires userID, sessionID
-    - Agent4: Requires script, voice, audio_option
-    - Agent5: Requires userID, sessionID, supersessionid
+    Runs the full orchestrator pipeline (Agent2 -> Agent4 -> Agent5).
+    For testing individual agents, use the dedicated test endpoints:
+    - /api/agent2/test
+    - /api/agent4/test
+    - /api/agent5/test
     """
-    agent_selection = request.agent_selection or "Full Test"
+    session_id = request.sessionID.strip()
+    user_id = request.userID.strip()
+    logger.info(f"[startprocessing] Received request sessionID='{session_id}', userID='{user_id}'")
 
     # Try to get database connection, but make it optional
     db = None
@@ -837,322 +570,104 @@ async def start_processing(
             except Exception:
                 pass
         db = None
-    
-    # Handle Full Test mode
-    if agent_selection == "Full Test":
-        # Validate required fields
-        if not request.sessionID or not request.userID:
-            raise HTTPException(
-                status_code=400,
-                detail="sessionID and userID are required for Full Test",
-            )
-        
-        session_id = request.sessionID.strip()
-        user_id = request.userID.strip()
 
-        # Use orchestrator to coordinate the Full Test process
-        async def run_orchestrator():
-            """Wrapper to catch and log errors in background task."""
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.info(
-                "Starting orchestrator for Full Test, session %s, user %s",
+    # Use orchestrator to coordinate the pipeline process
+    async def run_orchestrator():
+        """Wrapper to catch and log errors in background task."""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(
+            "Starting orchestrator for session %s, user %s",
+            session_id,
+            user_id,
+        )
+
+        # Wait for WebSocket connection
+        logger.info(f"Waiting for WebSocket connection for session {session_id}...")
+        connection_ready = await websocket_manager.wait_for_connection(
+            session_id,
+            max_wait=3.0,
+            check_interval=0.1
+        )
+
+        if not connection_ready:
+            logger.warning(
+                "No WebSocket connection found for session %s after waiting. Proceeding anyway.",
                 session_id,
-                user_id,
             )
 
-            # Wait for WebSocket connection
-            logger.info(f"Waiting for WebSocket connection for session {session_id}...")
-            connection_ready = await websocket_manager.wait_for_connection(
-                session_id,
-                max_wait=3.0,
-                check_interval=0.1
-            )
-            
-            if not connection_ready:
-                logger.warning(
-                    "No WebSocket connection found for session %s after waiting. Proceeding anyway.",
-                    session_id,
-                )
-            
-            try:
-                from app.services.orchestrator import VideoGenerationOrchestrator
-                orchestrator = VideoGenerationOrchestrator(websocket_manager)
-                # Orchestrator will query video_session table itself using userId and sessionId
-                await orchestrator.start_full_test_process(
-                    userId=user_id,
-                    sessionId=session_id,
-                    db=db  # Pass db to orchestrator, which will query video_session table
-                )
-                logger.info(f"Orchestrator completed for session {session_id}")
-            except Exception as e:
-                logger.exception(f"Error in orchestrator for session {session_id}: {e}")
-                # Error status will be sent by orchestrator
-        
-        # Verify webhook secret access before starting
-        try:
-            from app.services.orchestrator import _get_webhook_secret
-            webhook_secret = _get_webhook_secret()
-            if webhook_secret:
-                logger.info(f"Webhook secret verified successfully for session {session_id}")
-            else:
-                logger.warning(f"Webhook secret not available for session {session_id} - webhook notifications may fail")
-        except Exception as e:
-            logger.warning(f"Could not verify webhook secret for session {session_id}: {e} - continuing anyway")
-        
-        # Send webhook notification for processing_started
         try:
             from app.services.orchestrator import VideoGenerationOrchestrator
-            temp_orchestrator = VideoGenerationOrchestrator(websocket_manager)
-            await temp_orchestrator._send_webhook_notification(
+            orchestrator = VideoGenerationOrchestrator(websocket_manager)
+            await orchestrator.start_full_test_process(
+                userId=user_id,
                 sessionId=session_id,
-                video_url="",
-                status="processing_started",
-                payload={"userId": user_id, "agent_selection": agent_selection}
+                db=db
             )
-            logger.info(f"Sent processing_started webhook for session {session_id}")
+            logger.info(f"Orchestrator completed for session {session_id}")
         except Exception as e:
-            # Log but don't fail - webhook is non-critical
-            logger.warning(f"Failed to send processing_started webhook for session {session_id}: {e}")
-        
-        # Create task in the current event loop (we're already in an async context)
-        task = asyncio.create_task(run_orchestrator())
-        if not hasattr(app.state, 'background_tasks'):
-            app.state.background_tasks = set()
-        app.state.background_tasks.add(task)
-        
-        # Track active session by user_id and session_id
-        if not hasattr(app.state, 'active_sessions'):
-            app.state.active_sessions = {}
-        if user_id not in app.state.active_sessions:
-            app.state.active_sessions[user_id] = {}
-        app.state.active_sessions[user_id][session_id] = task
-        
-        # Clean up when task completes
-        def cleanup_task(task_ref):
-            try:
-                if hasattr(app.state, 'active_sessions') and user_id in app.state.active_sessions:
-                    if session_id in app.state.active_sessions[user_id]:
-                        # Only delete if it's still the same task (might have been replaced)
-                        if app.state.active_sessions[user_id][session_id] is task_ref:
-                            del app.state.active_sessions[user_id][session_id]
-                    # Clean up empty user dict
-                    if user_id in app.state.active_sessions and not app.state.active_sessions[user_id]:
-                        del app.state.active_sessions[user_id]
-            except (KeyError, AttributeError):
-                # Session or user dict might have been deleted by cancel_processing
-                pass
-            if hasattr(app.state, 'background_tasks'):
-                app.state.background_tasks.discard(task_ref)
-        
-        task.add_done_callback(cleanup_task)
-        
-        return StartProcessingResponse(
-            success=True,
-            message="Full Test processing started successfully",
-            sessionID=session_id
+            logger.exception(f"Error in orchestrator for session {session_id}: {e}")
+
+    # Verify webhook secret access before starting
+    try:
+        from app.services.orchestrator import _get_webhook_secret
+        webhook_secret = _get_webhook_secret()
+        if webhook_secret:
+            logger.info(f"Webhook secret verified successfully for session {session_id}")
+        else:
+            logger.warning(f"Webhook secret not available for session {session_id} - webhook notifications may fail")
+    except Exception as e:
+        logger.warning(f"Could not verify webhook secret for session {session_id}: {e} - continuing anyway")
+
+    # Send webhook notification for processing_started
+    try:
+        from app.services.orchestrator import VideoGenerationOrchestrator
+        temp_orchestrator = VideoGenerationOrchestrator(websocket_manager)
+        await temp_orchestrator._send_webhook_notification(
+            sessionId=session_id,
+            video_url="",
+            status="processing_started",
+            payload={"userId": user_id}
         )
-    
-    # Handle individual agent modes
-    elif agent_selection == "Agent2":
-        if not request.userID or not request.userID.strip():
-            raise HTTPException(status_code=400, detail="userID is required for Agent2")
-        if not request.sessionID or not request.sessionID.strip():
-            raise HTTPException(status_code=400, detail="sessionID is required for Agent2")
-        
-        # Start Agent2 with minimal inputs
-        async def run_agent_2_with_error_handling():
-            logger = logging.getLogger(__name__)
-            logger.info(f"Starting Agent2 for session {request.sessionID}")
-            
-            connection_ready = await websocket_manager.wait_for_connection(
-                request.sessionID,
-                max_wait=3.0,
-                check_interval=0.1
-            )
-            
-            try:
-                await agent_2_process_impl(
-                    websocket_manager=websocket_manager,
-                    user_id=request.userID,
-                    session_id=request.sessionID,
-                    template_id="",  # Stub
-                    chosen_diagram_id="",  # Stub
-                    script_id="",  # Stub
-                    storage_service=storage_service,
-                    video_session_data=None
-                )
-            except Exception as e:
-                logger.exception(f"Error in agent_2_process: {e}")
-                try:
-                    await websocket_manager.send_progress(request.sessionID, {
-                        "agentnumber": "Agent2",
-                        "userID": request.userID,
-                        "sessionID": request.sessionID,
-                        "status": "error",
-                        "error": str(e),
-                        "reason": f"Agent2 failed: {type(e).__name__}"
-                    })
-                except Exception:
-                    pass
-        
-        loop = asyncio.get_event_loop()
-        task = loop.create_task(run_agent_2_with_error_handling())
-        if not hasattr(app.state, 'background_tasks'):
-            app.state.background_tasks = set()
-        app.state.background_tasks.add(task)
-        task.add_done_callback(app.state.background_tasks.discard)
-        
-        return StartProcessingResponse(
-            success=True,
-            message="Agent2 started successfully",
-            sessionID=request.sessionID
-        )
-    
-    elif agent_selection == "Agent4":
-        if not request.userID or not request.userID.strip():
-            raise HTTPException(status_code=400, detail="userID is required for Agent4")
-        if not request.sessionID or not request.sessionID.strip():
-            raise HTTPException(status_code=400, detail="sessionID is required for Agent4")
-        
-        # Query video_session table to get the same data Agent2 uses
-        video_session_data = None
+        logger.info(f"Sent processing_started webhook for session {session_id}")
+    except Exception as e:
+        # Log but don't fail - webhook is non-critical
+        logger.warning(f"Failed to send processing_started webhook for session {session_id}: {e}")
+
+    # Create task in the current event loop (we're already in an async context)
+    task = asyncio.create_task(run_orchestrator())
+    if not hasattr(app.state, 'background_tasks'):
+        app.state.background_tasks = set()
+    app.state.background_tasks.add(task)
+
+    # Track active session by user_id and session_id
+    if not hasattr(app.state, 'active_sessions'):
+        app.state.active_sessions = {}
+    if user_id not in app.state.active_sessions:
+        app.state.active_sessions[user_id] = {}
+    app.state.active_sessions[user_id][session_id] = task
+
+    # Clean up when task completes
+    def cleanup_task(task_ref):
         try:
-            result = db.execute(
-                sql_text(
-                    "SELECT * FROM video_session WHERE id = :session_id AND user_id = :user_id"
-                ),
-                {"session_id": request.sessionID, "user_id": request.userID},
-            ).fetchone()
-            
-            if result:
-                # Convert result to dict (same as orchestrator does)
-                if hasattr(result, "_mapping"):
-                    video_session_data = dict(result._mapping)
-                else:
-                    video_session_data = {
-                        "id": getattr(result, "id", None),
-                        "user_id": getattr(result, "user_id", None),
-                        "topic": getattr(result, "topic", None),
-                        "confirmed_facts": getattr(result, "confirmed_facts", None),
-                        "generated_script": getattr(result, "generated_script", None),
-                    }
-                logger.info(f"Loaded video_session data for Agent4 session {request.sessionID}")
-        except Exception as e:
-            logger.warning(f"Could not load video_session data for Agent4: {e}")
-            # Continue anyway - Agent4 can work with just the script parameter
-        
-        # Start Agent4 directly
-        async def run_agent_4_with_error_handling():
-            logger = logging.getLogger(__name__)
-            logger.info(f"Starting Agent4 for session {request.sessionID}")
-            
-            connection_ready = await websocket_manager.wait_for_connection(
-                request.sessionID,
-                max_wait=3.0,
-                check_interval=0.1
-            )
-            
-            try:
-                from app.agents.agent_4 import agent_4_process
-                
-                await agent_4_process(
-                    websocket_manager=websocket_manager,
-                    user_id=request.userID,
-                    session_id=request.sessionID,
-                    script=request.script or {},  # Use provided script or empty dict (will be extracted from DB)
-                    voice=request.voice or "alloy",
-                    audio_option=request.audio_option or "tts",
-                    storage_service=storage_service,
-                    agent2_data=None,  # Deprecated
-                    video_session_data=video_session_data,  # Pass same data as orchestrator
-                    db=db  # Pass database session so Agent4 can query if needed
-                )
-            except Exception as e:
-                logger.exception(f"Error in agent_4_process: {e}")
-                try:
-                    await websocket_manager.send_progress(request.sessionID, {
-                        "agentnumber": "Agent4",
-                        "userID": request.userID,
-                        "sessionID": request.sessionID,
-                        "status": "error",
-                        "error": str(e),
-                        "reason": f"Agent4 failed: {type(e).__name__}"
-                    })
-                except Exception:
-                    pass
-        
-        loop = asyncio.get_event_loop()
-        task = loop.create_task(run_agent_4_with_error_handling())
-        if not hasattr(app.state, 'background_tasks'):
-            app.state.background_tasks = set()
-        app.state.background_tasks.add(task)
-        task.add_done_callback(app.state.background_tasks.discard)
-        
-        return StartProcessingResponse(
-            success=True,
-            message="Agent4 started successfully",
-            sessionID=request.sessionID
-        )
-    
-    elif agent_selection == "Agent5":
-        if not request.userID or not request.userID.strip():
-            raise HTTPException(status_code=400, detail="userID is required for Agent5")
-        if not request.sessionID or not request.sessionID.strip():
-            raise HTTPException(status_code=400, detail="sessionID is required for Agent5")
-        if not request.supersessionid or not request.supersessionid.strip():
-            raise HTTPException(status_code=400, detail="supersessionid is required for Agent5")
-        
-        # Start Agent5 directly
-        async def run_agent_5_with_error_handling():
-            logger = logging.getLogger(__name__)
-            logger.info(f"Starting Agent5 for session {request.sessionID}")
-            
-            connection_ready = await websocket_manager.wait_for_connection(
-                request.sessionID,
-                max_wait=3.0,
-                check_interval=0.1
-            )
-            
-            try:
-                from app.agents.agent_5 import agent_5_process
-                await agent_5_process(
-                    websocket_manager=websocket_manager,
-                    user_id=request.userID,
-                    session_id=request.sessionID,
-                    supersessionid=request.supersessionid,
-                    storage_service=storage_service,
-                    pipeline_data=None  # Optional
-                )
-            except Exception as e:
-                logger.exception(f"Error in agent_5_process: {e}")
-                try:
-                    await websocket_manager.send_progress(request.sessionID, {
-                        "agentnumber": "Agent5",
-                        "userID": request.userID,
-                        "sessionID": request.sessionID,
-                        "status": "error",
-                        "error": str(e),
-                        "reason": f"Agent5 failed: {type(e).__name__}"
-                    })
-                except Exception:
-                    pass
-        
-        loop = asyncio.get_event_loop()
-        task = loop.create_task(run_agent_5_with_error_handling())
-        if not hasattr(app.state, 'background_tasks'):
-            app.state.background_tasks = set()
-        app.state.background_tasks.add(task)
-        task.add_done_callback(app.state.background_tasks.discard)
-        
-        return StartProcessingResponse(
-            success=True,
-            message="Agent5 started successfully",
-            sessionID=request.sessionID
-        )
-    
-    else:
-        raise HTTPException(status_code=400, detail=f"Invalid agent_selection: {agent_selection}. Must be 'Full Test', 'Agent2', 'Agent4', or 'Agent5'")
+            if hasattr(app.state, 'active_sessions') and user_id in app.state.active_sessions:
+                if session_id in app.state.active_sessions[user_id]:
+                    if app.state.active_sessions[user_id][session_id] is task_ref:
+                        del app.state.active_sessions[user_id][session_id]
+                if user_id in app.state.active_sessions and not app.state.active_sessions[user_id]:
+                    del app.state.active_sessions[user_id]
+        except (KeyError, AttributeError):
+            pass
+        if hasattr(app.state, 'background_tasks'):
+            app.state.background_tasks.discard(task_ref)
+
+    task.add_done_callback(cleanup_task)
+
+    return StartProcessingResponse(
+        success=True,
+        message="Video generation started successfully",
+        sessionID=session_id
+    )
 
 
 # =============================================================================
@@ -1344,13 +859,8 @@ async def kill_all_agents():
 
 
 # =============================================================================
-# Agent Test Endpoints - Test individual agents with custom input
+# Shared Response Models for Agent Tests
 # =============================================================================
-
-class AgentTestRequest(BaseModel):
-    """Request model for testing agents with custom input."""
-    input: Dict[str, Any]
-
 
 class AgentTestResponse(BaseModel):
     """Standardized response from agent tests."""
@@ -1359,189 +869,6 @@ class AgentTestResponse(BaseModel):
     cost: float
     duration: float
     error: Optional[str] = None
-
-
-@app.get("/api/test/agents")
-async def list_available_agents() -> Dict[str, Any]:
-    """List all available agents with their expected input schemas."""
-    return {
-        "agents": [
-            {
-                "name": "storyboard",
-                "description": "Agent 2: Generate storyboard from script and optional diagrams",
-                "inputSchema": {
-                    "sessionId": "string",
-                    "script": "string",
-                    "diagramUrls": ["string (optional)"]
-                },
-                "exampleInput": {
-                    "sessionId": "test-session-123",
-                    "script": "This is the script content for the video...",
-                    "diagramUrls": ["https://example.com/diagram1.png", "https://example.com/diagram2.png"]
-                }
-            },
-            {
-                "name": "audio",
-                "description": "Agent 3: Generate narration and music from storyboard",
-                "inputSchema": {
-                    "sessionId": "string",
-                    "storyboardId": "string"
-                },
-                "exampleInput": {
-                    "sessionId": "test-session-123",
-                    "storyboardId": "storyboard-001"
-                }
-            },
-            {
-                "name": "video",
-                "description": "Agent 4: Compose final video from storyboard, narration, and music",
-                "inputSchema": {
-                    "sessionId": "string",
-                    "storyboardId": "string",
-                    "narrationIds": ["string"],
-                    "musicId": "string"
-                },
-                "exampleInput": {
-                    "sessionId": "test-session-123",
-                    "storyboardId": "storyboard-001",
-                    "narrationIds": ["narration-1", "narration-2"],
-                    "musicId": "music-001"
-                }
-            }
-        ]
-    }
-
-
-@app.post("/api/test/agent/storyboard", response_model=AgentTestResponse)
-async def test_storyboard_agent(request: AgentTestRequest) -> AgentTestResponse:
-    """Test Agent 2 (Storyboard Generator) with custom input."""
-    start_time = time.time()
-
-    try:
-        input_data = request.input
-
-        # Validate required fields
-        required = ["sessionId", "script"]
-        missing = [f for f in required if f not in input_data]
-        if missing:
-            return AgentTestResponse(
-                success=False,
-                data={},
-                cost=0.0,
-                duration=time.time() - start_time,
-                error=f"Missing required fields: {', '.join(missing)}"
-            )
-
-        # Call the agent
-        storyboard_id = await agent_2_generate_storyboard(
-            session_id=input_data["sessionId"],
-            script=input_data["script"],
-            diagram_urls=input_data.get("diagramUrls")
-        )
-
-        return AgentTestResponse(
-            success=True,
-            data={"storyboardId": storyboard_id},
-            cost=0.0,  # Stub has no cost
-            duration=time.time() - start_time
-        )
-
-    except Exception as e:
-        return AgentTestResponse(
-            success=False,
-            data={},
-            cost=0.0,
-            duration=time.time() - start_time,
-            error=str(e)
-        )
-
-
-@app.post("/api/test/agent/audio", response_model=AgentTestResponse)
-async def test_audio_agent(request: AgentTestRequest) -> AgentTestResponse:
-    """Test Agent 3 (Audio Generator) with custom input."""
-    start_time = time.time()
-
-    try:
-        input_data = request.input
-
-        # Validate required fields
-        required = ["sessionId", "storyboardId"]
-        missing = [f for f in required if f not in input_data]
-        if missing:
-            return AgentTestResponse(
-                success=False,
-                data={},
-                cost=0.0,
-                duration=time.time() - start_time,
-                error=f"Missing required fields: {', '.join(missing)}"
-            )
-
-        # Call the agent
-        result = await agent_3_generate_audio(
-            session_id=input_data["sessionId"],
-            storyboard_id=input_data["storyboardId"]
-        )
-
-        return AgentTestResponse(
-            success=True,
-            data=result,
-            cost=0.0,  # Stub has no cost
-            duration=time.time() - start_time
-        )
-
-    except Exception as e:
-        return AgentTestResponse(
-            success=False,
-            data={},
-            cost=0.0,
-            duration=time.time() - start_time,
-            error=str(e)
-        )
-
-
-@app.post("/api/test/agent/video", response_model=AgentTestResponse)
-async def test_video_agent(request: AgentTestRequest) -> AgentTestResponse:
-    """Test Agent 4 (Video Composer) with custom input."""
-    start_time = time.time()
-
-    try:
-        input_data = request.input
-
-        # Validate required fields
-        required = ["sessionId", "storyboardId", "narrationIds", "musicId"]
-        missing = [f for f in required if f not in input_data]
-        if missing:
-            return AgentTestResponse(
-                success=False,
-                data={},
-                cost=0.0,
-                duration=time.time() - start_time,
-                error=f"Missing required fields: {', '.join(missing)}"
-            )
-
-        # Call the agent
-        result = await agent_4_compose_video(
-            session_id=input_data["sessionId"],
-            storyboard_id=input_data["storyboardId"],
-            narration_ids=input_data["narrationIds"],
-            music_id=input_data["musicId"]
-        )
-
-        return AgentTestResponse(
-            success=True,
-            data=result,
-            cost=0.0,  # Stub has no cost
-            duration=time.time() - start_time
-        )
-
-    except Exception as e:
-        return AgentTestResponse(
-            success=False,
-            data={},
-            cost=0.0,
-            duration=time.time() - start_time,
-            error=str(e)
-        )
 
 
 # =============================================================================
@@ -1617,70 +944,88 @@ class Agent4TestRequest(BaseModel):
     session_id: str
     script: Dict[str, Any]
     voice: str = "alloy"
+    voice_instructions: Optional[str] = None  # Voice instructions for gpt-4o-mini-tts
     audio_option: str = "tts"
     agent2_data: Optional[Dict[str, Any]] = None  # Optional data from Agent2
 
 
 @app.post("/api/agent4/test", response_model=AgentTestResponse)
-async def test_agent4_audio(request: Agent4TestRequest) -> AgentTestResponse:
+async def test_agent4_audio(
+    request: Agent4TestRequest,
+    db: Session = Depends(get_db)
+) -> AgentTestResponse:
     """
-    Test Agent 4 (Audio Pipeline) directly with custom script input.
+    Test Agent 4 (Audio Pipeline) using agent_4_process.
 
-    This endpoint allows direct testing of the audio generation functionality
-    without going through the full pipeline.
+    This endpoint properly tests Agent 4 by calling agent_4_process (like the orchestrator does),
+    which includes database integration, script normalization, status updates, and S3 operations.
     """
     start_time = time.time()
 
     try:
-        # Import and instantiate the AudioPipelineAgent
-        from app.agents.audio_pipeline import AudioPipelineAgent
-        from app.agents.base import AgentInput
+        from app.agents.agent_4 import agent_4_process
 
-        # Create agent instance
-        audio_agent = AudioPipelineAgent(
-            db=None,  # No DB for direct testing
-            storage_service=storage_service,
-            websocket_manager=websocket_manager
-        )
+        # Query the existing video_session to get the actual user_id
+        result_query = db.execute(
+            sql_text("SELECT user_id FROM video_session WHERE id = :session_id"),
+            {"session_id": request.session_id}
+        ).fetchone()
 
-        # Create agent input
-        agent_input = AgentInput(
-            session_id=request.session_id,
-            data={
-                "script": request.script,
-                "voice": request.voice,
-                "audio_option": request.audio_option
+        if not result_query:
+            raise ValueError(f"Video session {request.session_id} not found. Create a script first using the test UI.")
+
+        user_id = result_query.user_id
+
+        # Update the script in the existing video_session
+        db.execute(
+            sql_text("""
+                UPDATE video_session
+                SET generated_script = :script, updated_at = NOW()
+                WHERE id = :session_id
+            """),
+            {
+                "session_id": request.session_id,
+                "script": json.dumps(request.script)
             }
         )
+        db.commit()
 
-        # Process audio generation
-        result = await audio_agent.process(agent_input)
+        # Call agent_4_process (full Agent 4 pipeline like orchestrator does)
+        result = await agent_4_process(
+            websocket_manager=websocket_manager,
+            user_id=user_id,
+            session_id=request.session_id,
+            script=None,  # Force extraction from database
+            voice=request.voice,
+            voice_instructions=request.voice_instructions,
+            audio_option=request.audio_option,
+            storage_service=storage_service,
+            video_session_data=None,  # Force DB query
+            db=db,
+            status_callback=None
+        )
 
-        # Build pipeline_data structure like agent_4 does for agent_5
-        pipeline_data = {
-            "agent2_data": request.agent2_data or {
-                "template_id": "test-template",
-                "chosen_diagram_id": "test-diagram",
-                "script_id": "test-script",
-                "supersessionid": f"{request.session_id}_test"
-            },
-            "script": request.script,
-            "voice": request.voice,
-            "audio_option": request.audio_option,
-            "audio_data": result.data
-        }
+        # Calculate cost from result
+        total_cost = result.get("total_cost", 0.0)
 
         return AgentTestResponse(
-            success=result.success,
-            data=pipeline_data,
-            cost=result.cost,
-            duration=result.duration,
-            error=result.error
+            success=result.get("status") == "success",
+            data={
+                "audio_files": result.get("audio_files", []),
+                "total_duration": result.get("total_duration", 0.0),
+                "total_cost": total_cost,
+                "session_id": request.session_id,
+                "final_audio": result.get("final_audio")  # Final mixed 60s audio track
+            },
+            cost=total_cost,
+            duration=time.time() - start_time,
+            error=None
         )
 
     except Exception as e:
         import traceback
         logger.error(f"Agent 4 test failed: {e}\n{traceback.format_exc()}")
+        db.rollback()
         return AgentTestResponse(
             success=False,
             data={},
