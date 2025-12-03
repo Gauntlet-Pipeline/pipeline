@@ -624,9 +624,10 @@ async def agent_5_process(
         # Create temp directory for assets
         temp_dir = tempfile.mkdtemp(prefix="agent5_")
 
-        # Build visual scenes and segment durations for each section from storyboard
+        # Build visual scenes, video prompts, and segment durations for each section from storyboard
         sections = ["hook", "concept", "process", "conclusion"]
         visual_scenes = {}  # Store visual_scene objects for image generation
+        video_prompts = {}  # Store video_prompt objects for video motion guidance
         section_seeds = {}  # Store seeds for consistency
         segment_durations = {}  # Store segment durations (in seconds)
 
@@ -672,6 +673,23 @@ async def agent_5_process(
 
             visual_scenes[part] = visual_scene
 
+            # Get video_prompt from storyboard segment (for video motion guidance)
+            video_prompt = segment.get("video_prompt")
+
+            # Fallback: create basic video_prompt
+            if not video_prompt:
+                key_concepts = segment.get("key_concepts", [])
+                video_prompt = {
+                    "scene_action": f"Visual elements illustrate {', '.join(key_concepts[:2]) if key_concepts else 'the concept'}",
+                    "motion_type": "smooth animation",
+                    "key_element_motion": "Main subject gently animates",
+                    "emphasis": "central subject",
+                    "pacing": "steady and clear",
+                    "emotion": "engagement"
+                }
+
+            video_prompts[part] = video_prompt
+
             # Get duration from storyboard segment with defaults
             default_durations = {"hook": 10.0, "concept": 15.0, "process": 20.0, "conclusion": 15.0}
             duration = segment.get("duration")
@@ -683,8 +701,9 @@ async def agent_5_process(
             else:
                 segment_durations[part] = default_durations.get(part, 15.0)
 
-            # Log the visual scene info
+            # Log the visual scene and video prompt info
             logger.info(f"[{session_id}] Section '{part}': {segment_durations[part]}s, visual_scene: {visual_scene.get('description', '')[:100]}...")
+            logger.info(f"[{session_id}] Section '{part}' video_prompt: {video_prompt.get('scene_action', '')[:80]}...")
 
         # Generate all videos in parallel using asyncio.gather
         # Track completion for progress updates
@@ -725,15 +744,15 @@ async def agent_5_process(
             """Generate multiple video clips for a section and return (section, list_of_clip_paths)"""
             import httpx
 
-            # Get visual_scene description for video prompt
+            # Get visual_scene and video_prompt for this section
             visual_scene = visual_scenes[section]
-            scene_description = visual_scene.get("description", "")
+            video_prompt = video_prompts[section]
             clips_needed = clips_per_section[section]
 
             logger.info(f"[{session_id}] Generating {clips_needed} clips for section '{section}'")
-            logger.info(f"[{session_id}] Using scene description for '{section}': {scene_description[:150]}...")
+            logger.info(f"[{session_id}] Using video_prompt for '{section}': {video_prompt.get('scene_action', '')[:150]}...")
 
-            # Get base_scene for visual consistency across all clips
+            # Get base_scene for teacher cut reference
             # Check both new format (agent_3_data) and old format (root level)
             if agent_3_data:
                 base_scene = agent_3_data.get("base_scene", {})
@@ -742,45 +761,67 @@ async def agent_5_process(
             else:
                 base_scene = {}
 
-            # Build base_scene context string for video prompts
+            # Build teacher cut description from base_scene
             def to_string(val):
                 if isinstance(val, dict):
                     return " ".join(str(v) for v in val.values() if v)
                 return str(val) if val else ""
 
-            base_scene_parts = []
-            if base_scene.get("style"):
-                base_scene_parts.append(f"Style: {to_string(base_scene['style'])}")
-            if base_scene.get("setting"):
-                setting_str = to_string(base_scene["setting"])
-                # Limit setting length
-                setting_words = setting_str.split()[:30]
-                base_scene_parts.append(f"Setting: {' '.join(setting_words)}")
-            if base_scene.get("teacher"):
-                teacher_str = to_string(base_scene["teacher"])
-                teacher_words = teacher_str.split()[:20]
-                base_scene_parts.append(f"Teacher: {' '.join(teacher_words)}")
-            if base_scene.get("students"):
-                students_str = to_string(base_scene["students"])
-                students_words = students_str.split()[:20]
-                base_scene_parts.append(f"Students: {' '.join(students_words)}")
+            teacher_desc = to_string(base_scene.get("teacher", ""))
+            setting_desc = to_string(base_scene.get("setting", ""))
+            style_desc = to_string(base_scene.get("style", ""))
 
-            base_scene_context = " | ".join(base_scene_parts) + " | " if base_scene_parts else ""
+            # Truncate for prompt length
+            teacher_words = teacher_desc.split()[:25]
+            setting_words = setting_desc.split()[:20]
+            style_words = style_desc.split()[:15]
+
+            teacher_cut = ""
+            if teacher_words:
+                teacher_cut = f", then cut to teacher explaining in classroom: {' '.join(teacher_words)}"
+                if setting_words:
+                    teacher_cut += f" in {' '.join(setting_words)}"
+                if style_words:
+                    teacher_cut += f", {' '.join(style_words)}"
 
             # Generate progressive prompts for each clip position
+            # - First/middle clips: video_prompt only (animate the educational visual)
+            # - Last clip: base_scene only (cut to teacher in classroom)
             clip_prompts = []
+            video_prompt_str = json.dumps(video_prompt)
+
+            # Build classroom scene prompt from base_scene for the final clip
+            classroom_prompt_parts = []
+            if style_words:
+                classroom_prompt_parts.append(' '.join(style_words))
+            if setting_words:
+                classroom_prompt_parts.append(f"classroom setting: {' '.join(setting_words)}")
+            if teacher_words:
+                classroom_prompt_parts.append(f"teacher {' '.join(teacher_words)} explaining to students")
+            classroom_prompt = ", ".join(classroom_prompt_parts) if classroom_prompt_parts else "teacher explaining in animated classroom"
+
             for i in range(clips_needed):
-                # Create clip-specific temporal and action cues based on position
+                is_last_clip = (i == clips_needed - 1)
+
                 if clips_needed == 1:
-                    clip_prompt = f"{base_scene_context}{scene_description}, smooth cinematic movement"
+                    # Single clip: use video_prompt with transition to classroom
+                    clip_prompt = f"{video_prompt_str}, then transition to {classroom_prompt}"
+                elif is_last_clip:
+                    # Last clip: classroom scene only (teacher explaining)
+                    clip_prompt = f"CLASSROOM SCENE: {classroom_prompt}, engaging with students, warm educational atmosphere"
                 elif i == 0:
-                    clip_prompt = f"{base_scene_context}OPENING SHOT: {scene_description}, camera slowly pushes in, beginning of action"
-                elif i == clips_needed - 1:
-                    clip_prompt = f"{base_scene_context}FINAL SHOT: {scene_description}, camera holds steady, completing action"
+                    # First clip: video_prompt only
+                    clip_prompt = f"OPENING: {video_prompt_str}"
                 else:
-                    clip_prompt = f"{base_scene_context}SHOT {i+1}: {scene_description}, camera maintains angle, continuous motion"
+                    # Middle clips: video_prompt only, continuing motion
+                    clip_prompt = f"CONTINUATION {i+1}: {video_prompt_str}, continuing motion"
 
                 clip_prompts.append(clip_prompt)
+
+            logger.info(f"[{session_id}] Built {len(clip_prompts)} clip prompts for '{section}'")
+            logger.info(f"[{session_id}] First clip: {clip_prompts[0][:150]}...")
+            if len(clip_prompts) > 1:
+                logger.info(f"[{session_id}] Last clip (classroom): {clip_prompts[-1][:150]}...")
 
             # Get seed from storyboard segment or generate deterministic fallback
             section_seed = section_seeds.get(section)

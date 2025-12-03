@@ -84,6 +84,14 @@ async def agent_3_process(
         )
         logger.info("Agent3 generated visual_scene for storyboard segments")
 
+        # Generate video_prompt for each segment (for video generation motion guidance)
+        await send_status("processing", message="Generating video prompts...")
+        storyboard = await _generate_video_prompts(
+            storyboard=storyboard,
+            topic=data.get("topic")
+        )
+        logger.info("Agent3 generated video_prompt for storyboard segments")
+
         # Generate base scene (for video generation)
         await send_status("processing", message="Generating base scene...")
         base_scene = await _generate_base_scene(
@@ -438,4 +446,142 @@ def _get_fallback_visual_scene(segment: dict) -> dict:
         "key_elements": key_concepts[:5] if key_concepts else ["educational content"],
         "mood": "engaging and educational",
         "color_palette": ["blue", "green", "warm yellow", "white"]
+    }
+
+
+async def _generate_video_prompts(
+    storyboard: dict,
+    topic: Optional[str] = None
+) -> dict:
+    """Generate video_prompt objects for each storyboard segment using LLM.
+
+    The video_prompt guides how the generated image should animate/move,
+    focusing on the visual content rather than the classroom setting.
+
+    Args:
+        storyboard: Storyboard dict with segments (should already have visual_scene)
+        topic: Video topic for context
+
+    Returns:
+        Updated storyboard with video_prompt added to each segment
+    """
+    client = _get_openai_client()
+    if not client:
+        logger.warning("No OpenAI client available, using fallback video prompts")
+        return _add_fallback_video_prompts(storyboard)
+
+    segments = storyboard.get("segments", [])
+    if not segments:
+        return storyboard
+
+    # Build context for the LLM - include visual_scene for reference
+    segments_context = []
+    for seg in segments:
+        segments_context.append({
+            "type": seg.get("type"),
+            "narration": seg.get("narration", "")[:300],
+            "visual_scene": seg.get("visual_scene", {}),
+            "key_concepts": seg.get("key_concepts", [])
+        })
+
+    prompt = f"""Generate video motion prompts for image-to-video AI generation.
+
+Topic: {topic or "educational content"}
+
+Each segment has a visual_scene (static image description). Create a video_prompt that describes
+how that image should animate/move to bring it to life. Focus on the VISUAL CONTENT motion,
+not the classroom - the classroom teacher transition will be added separately.
+
+IMPORTANT GUIDELINES:
+- Describe motion relative to the visual_scene image
+- Focus on how key elements animate, reveal, or transform
+- Keep motion smooth and educational-appropriate
+- Avoid drastic scene changes - this animates a single image
+
+Segments with their visual_scenes:
+{json.dumps(segments_context, indent=2)}
+
+Return JSON with this exact structure:
+{{
+  "video_prompts": [
+    {{
+      "segment_type": "hook",
+      "video_prompt": {{
+        "scene_action": "What happens in this scene based on narration (1-2 sentences)",
+        "motion_type": "Type of movement (zoom in, elements animate, reveal, pan, etc.)",
+        "key_element_motion": "How the main visual element moves or animates",
+        "emphasis": "What to draw viewer attention to",
+        "pacing": "Energy/speed (slow reveal, dynamic, gentle, energetic)",
+        "emotion": "Feeling to convey (wonder, curiosity, excitement, calm)"
+      }}
+    }}
+  ]
+}}
+
+Generate video_prompt for each of the {len(segments)} segments in order."""
+
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5,
+            response_format={"type": "json_object"}
+        )
+        result = json.loads(response.choices[0].message.content)
+        video_prompts = result.get("video_prompts", [])
+
+        # Map video_prompts back to segments by type
+        prompt_by_type = {vp.get("segment_type"): vp.get("video_prompt") for vp in video_prompts}
+
+        for seg in segments:
+            seg_type = seg.get("type")
+            if seg_type in prompt_by_type:
+                seg["video_prompt"] = prompt_by_type[seg_type]
+            else:
+                # Fallback for missing segments
+                seg["video_prompt"] = _get_fallback_video_prompt(seg)
+
+        logger.info(f"Generated video_prompt for {len(video_prompts)} segments via OpenAI")
+        return storyboard
+
+    except Exception as e:
+        logger.error(f"OpenAI video_prompt generation failed: {e}")
+        return _add_fallback_video_prompts(storyboard)
+
+
+def _add_fallback_video_prompts(storyboard: dict) -> dict:
+    """Add fallback video_prompt to each segment when LLM is unavailable."""
+    for seg in storyboard.get("segments", []):
+        seg["video_prompt"] = _get_fallback_video_prompt(seg)
+    return storyboard
+
+
+def _get_fallback_video_prompt(segment: dict) -> dict:
+    """Generate a basic fallback video_prompt from segment data."""
+    visual_scene = segment.get("visual_scene", {})
+    key_concepts = segment.get("key_concepts", [])
+    seg_type = segment.get("type", "")
+
+    # Vary motion type based on segment type
+    motion_types = {
+        "hook": "dynamic zoom in",
+        "concept_introduction": "slow reveal",
+        "process_explanation": "elements animate sequentially",
+        "conclusion": "gentle pull back"
+    }
+
+    emotions = {
+        "hook": "excitement",
+        "concept_introduction": "curiosity",
+        "process_explanation": "understanding",
+        "conclusion": "satisfaction"
+    }
+
+    return {
+        "scene_action": f"Visual elements illustrate {', '.join(key_concepts[:2]) if key_concepts else 'the concept'}",
+        "motion_type": motion_types.get(seg_type, "smooth animation"),
+        "key_element_motion": f"Main subject gently animates to show {key_concepts[0] if key_concepts else 'the topic'}",
+        "emphasis": visual_scene.get("key_elements", ["central subject"])[0] if visual_scene.get("key_elements") else "central subject",
+        "pacing": "steady and clear",
+        "emotion": emotions.get(seg_type, "engagement")
     }
